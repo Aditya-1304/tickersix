@@ -22,9 +22,14 @@ custom-panic = []
 
 [dependencies]
 anchor-lang = "1.1.2"
+solana-sha256-hasher = { version = "3.1.0", features = ["sha2"] }
+solana-instructions-sysvar = "3.0.1"
+solana-sdk-ids = "3.1.0"
 
 [dev-dependencies]
 litesvm = "0.10.0"
+protocol = { path = "../../crates/protocol" }
+solana-address = "2.7.0"
 solana-message = "3.0.1"
 solana-transaction = "3.0.2"
 solana-signer = "3.0.0"
