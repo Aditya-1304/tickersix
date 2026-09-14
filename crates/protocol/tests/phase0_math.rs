@@ -1,7 +1,116 @@
 use protocol::{
-    commitment, evidence_root, lineup_score_q9, parse_decimal_q9, price_sample_leaf, return_q9,
-    select_compatible_quorum, AttestorReport, MathError, PriceSample,
+    attestation_message, commitment, evidence_root, lineup_score_q9, parse_decimal_q9,
+    price_sample_leaf, return_q9, select_compatible_quorum, AttestorReport, MathError, PriceSample,
 };
+use serde::Deserialize;
+
+#[derive(Debug, Deserialize)]
+struct ProtocolVector {
+    version: u16,
+    lineup: LineupVector,
+    attestation: AttestationVector,
+}
+
+#[derive(Debug, Deserialize)]
+struct LineupVector {
+    program_id_hex: String,
+    battle_hex: String,
+    player_hex: String,
+    registry_version: u32,
+    asset_ids: [u16; 6],
+    captain_asset_id: u16,
+    salt_hex: String,
+    expected_commitment_hex: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct AttestationVector {
+    program_id_hex: String,
+    market_round_hex: String,
+    round_asset_hex: String,
+    asset_id: u16,
+    phase: u8,
+    scoring_mint_hex: String,
+    price_policy_version: u16,
+    market_quality_policy_version: u16,
+    attestor_set_version: u16,
+    median_price_q9: i64,
+    accepted_observation_count: u16,
+    unique_source_block_count: u16,
+    first_source_block_id: u64,
+    last_source_block_id: u64,
+    evidence_root_hex: String,
+    observation_window_start: i64,
+    observation_window_end: i64,
+    report_created_at: i64,
+    expected_message_parts: Vec<String>,
+}
+
+fn decode_hex<const N: usize>(value: &str) -> [u8; N] {
+    let bytes = (0..N)
+        .map(|index| u8::from_str_radix(&value[index * 2..index * 2 + 2], 16).unwrap())
+        .collect::<Vec<_>>();
+    bytes.try_into().unwrap()
+}
+
+fn decode_hex_vec(value: &str) -> Vec<u8> {
+    (0..value.len() / 2)
+        .map(|index| u8::from_str_radix(&value[index * 2..index * 2 + 2], 16).unwrap())
+        .collect()
+}
+
+#[test]
+fn checked_in_v2_vector_freezes_commitment_and_attestation_bytes() {
+    // Regression target: matching two implementations is insufficient if both
+    // drift together. The checked-in vector preserves the external protocol
+    // bytes and catches a shared domain, field-order, or encoding change.
+    let vector: ProtocolVector =
+        serde_json::from_str(include_str!("../../../fixtures/protocol_v2.json")).unwrap();
+    assert_eq!(vector.version, 1);
+
+    let lineup = vector.lineup;
+    assert_eq!(
+        commitment(
+            decode_hex(&lineup.program_id_hex),
+            decode_hex(&lineup.battle_hex),
+            decode_hex(&lineup.player_hex),
+            lineup.registry_version,
+            lineup.asset_ids,
+            lineup.captain_asset_id,
+            decode_hex(&lineup.salt_hex),
+        ),
+        decode_hex(&lineup.expected_commitment_hex)
+    );
+
+    let attestation = vector.attestation;
+    assert_eq!(
+        attestation_message(
+            decode_hex(&attestation.program_id_hex),
+            decode_hex(&attestation.market_round_hex),
+            decode_hex(&attestation.round_asset_hex),
+            attestation.asset_id,
+            attestation.phase,
+            decode_hex(&attestation.scoring_mint_hex),
+            attestation.price_policy_version,
+            attestation.market_quality_policy_version,
+            attestation.attestor_set_version,
+            attestation.median_price_q9,
+            attestation.accepted_observation_count,
+            attestation.unique_source_block_count,
+            attestation.first_source_block_id,
+            attestation.last_source_block_id,
+            decode_hex(&attestation.evidence_root_hex),
+            attestation.observation_window_start,
+            attestation.observation_window_end,
+            attestation.report_created_at,
+        ),
+        attestation
+            .expected_message_parts
+            .iter()
+            .flat_map(|part| decode_hex_vec(part))
+            .collect::<Vec<_>>()
+    );
+}
 
 #[test]
 fn decimal_prices_are_parsed_exactly_and_truncated_toward_zero() {

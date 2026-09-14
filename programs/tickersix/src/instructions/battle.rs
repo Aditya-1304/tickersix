@@ -233,8 +233,24 @@ impl BattleSide {
 pub struct CommitLineup<'info> {
     #[account(seeds = [CONFIG_SEED], bump = config.bump)]
     pub config: Account<'info, Config>,
-    #[account(mut)]
+    #[account(
+        mut,
+        seeds = [
+            BATTLE_SEED,
+            battle.market_round.as_ref(),
+            &battle.battle_id.to_le_bytes()
+        ],
+        bump = battle.bump,
+        constraint = battle.market_round == market_round.key() @ ErrorCode::WrongMarketRound
+    )]
     pub battle: Account<'info, Battle>,
+    #[account(
+        seeds = [
+            crate::constants::MARKET_ROUND_SEED,
+            &market_round.round_id.to_le_bytes()
+        ],
+        bump = market_round.bump
+    )]
     pub market_round: Account<'info, MarketRound>,
     pub player: Signer<'info>,
 }
@@ -270,19 +286,18 @@ pub fn handle_cancel_uncommitted_battle(ctx: Context<CancelUncommittedBattle>) -
 }
 
 pub fn handle_commit_lineup(ctx: Context<CommitLineup>, commitment: [u8; 32]) -> Result<()> {
-    let now = Clock::get()?.unix_timestamp;
+    let clock = Clock::get()?;
     require!(!ctx.accounts.config.paused, ErrorCode::ProtocolPaused);
-    require_keys_eq!(
-        ctx.accounts.battle.market_round,
-        ctx.accounts.market_round.key(),
-        ErrorCode::WrongMarketRound
+    require!(
+        ctx.accounts.market_round.state == MarketRoundState::CommitOpen,
+        ErrorCode::InvalidRoundState
     );
     require!(
         ctx.accounts.battle.result == BattleResult::Pending,
         ErrorCode::BattleAlreadyFinalized
     );
     require!(
-        now <= ctx.accounts.market_round.commit_deadline,
+        clock.unix_timestamp <= ctx.accounts.market_round.commit_deadline,
         ErrorCode::CommitWindowClosed
     );
     require!(commitment != [0; 32], ErrorCode::InvalidCommitmentState);
@@ -291,15 +306,31 @@ pub fn handle_commit_lineup(ctx: Context<CommitLineup>, commitment: [u8; 32]) ->
     require!(!side.committed, ErrorCode::InvalidCommitmentState);
     side.commitment = commitment;
     side.committed = true;
-    side.commit_slot = Clock::get()?.slot;
+    side.commit_slot = clock.slot;
     side.status = SideStatus::Committed;
     Ok(())
 }
 
 #[derive(Accounts)]
 pub struct RevealLineup<'info> {
-    #[account(mut)]
+    #[account(
+        mut,
+        seeds = [
+            BATTLE_SEED,
+            battle.market_round.as_ref(),
+            &battle.battle_id.to_le_bytes()
+        ],
+        bump = battle.bump,
+        constraint = battle.market_round == market_round.key() @ ErrorCode::WrongMarketRound
+    )]
     pub battle: Account<'info, Battle>,
+    #[account(
+        seeds = [
+            crate::constants::MARKET_ROUND_SEED,
+            &market_round.round_id.to_le_bytes()
+        ],
+        bump = market_round.bump
+    )]
     pub market_round: Account<'info, MarketRound>,
     pub player: Signer<'info>,
 }
@@ -310,19 +341,18 @@ pub fn handle_reveal_lineup(
     captain_asset_id: u16,
     salt: [u8; 32],
 ) -> Result<()> {
-    let now = Clock::get()?.unix_timestamp;
-    require_keys_eq!(
-        ctx.accounts.battle.market_round,
-        ctx.accounts.market_round.key(),
-        ErrorCode::WrongMarketRound
+    let clock = Clock::get()?;
+    require!(
+        ctx.accounts.market_round.state == MarketRoundState::RevealOpen,
+        ErrorCode::InvalidRoundState
     );
     require!(
         ctx.accounts.battle.result == BattleResult::Pending,
         ErrorCode::BattleAlreadyFinalized
     );
     require!(
-        now >= ctx.accounts.market_round.commit_deadline
-            && now <= ctx.accounts.market_round.reveal_deadline,
+        clock.unix_timestamp >= ctx.accounts.market_round.commit_deadline
+            && clock.unix_timestamp <= ctx.accounts.market_round.reveal_deadline,
         ErrorCode::RevealWindowClosed
     );
 
@@ -354,7 +384,7 @@ pub fn handle_reveal_lineup(
     side.asset_ids = canonical_ids;
     side.captain_asset_id = captain_asset_id;
     side.revealed = true;
-    side.reveal_slot = Clock::get()?.slot;
+    side.reveal_slot = clock.slot;
     side.status = SideStatus::Revealed;
     Ok(())
 }

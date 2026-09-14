@@ -5,7 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+aes-gcm = "0.10.3"
 market-data = { path = "../crates/market-data" }
+protocol = { path = "../crates/protocol" }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.145"
 tokio = { version = "1.53.1", features = ["macros", "rt-multi-thread", "time"] }

@@ -20,6 +20,8 @@ use market_data::{
 };
 use serde::{Deserialize, Serialize};
 
+pub mod recovery;
+
 const DEFAULT_ITERATIONS: usize = 1;
 const DEFAULT_SAMPLE_INTERVAL_SECS: u64 = 5;
 const DEFAULT_ATTESTOR_COUNT: usize = 3;

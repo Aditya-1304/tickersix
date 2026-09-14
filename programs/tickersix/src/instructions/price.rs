@@ -5,11 +5,14 @@ use solana_sdk_ids::ed25519_program;
 use crate::{
     constants::{
         ATTESTATION_DOMAIN, ATTESTOR_QUORUM, ATTESTOR_SET_SEED, MARKET_ROUND_SEED,
-        PRICE_ATTESTATION_SEED, PRICE_POLICY_SEED, ROUND_ASSET_SEED,
+        PRICE_ATTESTATION_SEED, PRICE_POLICY_SEED, QUALITY_POLICY_SEED, ROUND_ASSET_SEED,
     },
     error::ErrorCode,
     math::return_q9,
-    state::{AttestorSet, MarketRound, PriceAttestation, PricePhase, PricePolicy, RoundAsset},
+    state::{
+        AttestorSet, MarketQualityPolicy, MarketRound, PriceAttestation, PricePhase, PricePolicy,
+        RoundAsset,
+    },
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -30,7 +33,6 @@ struct QuorumResult {
 #[instruction(phase: PricePhase)]
 pub struct SubmitPriceAttestation<'info> {
     #[account(
-        mut,
         seeds = [ROUND_ASSET_SEED, market_round.key().as_ref(), &round_asset.asset_id.to_le_bytes()],
         bump = round_asset.bump,
         constraint = round_asset.market_round == market_round.key() @ ErrorCode::WrongMarketRound
@@ -46,6 +48,11 @@ pub struct SubmitPriceAttestation<'info> {
         bump = price_policy.bump
     )]
     pub price_policy: Account<'info, PricePolicy>,
+    #[account(
+        seeds = [QUALITY_POLICY_SEED, &market_round.market_quality_policy_version.to_le_bytes()],
+        bump = market_quality_policy.bump
+    )]
+    pub market_quality_policy: Account<'info, MarketQualityPolicy>,
     #[account(
         seeds = [ATTESTOR_SET_SEED, &market_round.attestor_set_version.to_le_bytes()],
         bump = attestor_set.bump
@@ -114,13 +121,22 @@ pub fn handle_submit_price_attestation(
         ErrorCode::InvalidAttestationEvidence
     );
     require!(
-        round_asset.price_policy_version == policy.version
+        round.price_policy_version == policy.version
+            && round_asset.price_policy_version == policy.version
             && round_asset.price_source_kind == policy.source_kind,
         ErrorCode::PricePolicyMismatch
     );
     require!(
-        round_asset.market_quality_policy_version == round.market_quality_policy_version,
+        round.market_quality_policy_version == ctx.accounts.market_quality_policy.version
+            && round_asset.market_quality_policy_version
+                == ctx.accounts.market_quality_policy.version
+            && round.market_quality_policy_hash
+                == ctx.accounts.market_quality_policy.canonical_policy_hash,
         ErrorCode::QualityPolicyMismatch
+    );
+    require!(
+        round.attestor_set_version == ctx.accounts.attestor_set.version,
+        ErrorCode::AttestorSetMismatch
     );
     require!(
         ctx.accounts.attestor_set.quorum == ATTESTOR_QUORUM
