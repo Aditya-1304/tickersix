@@ -196,6 +196,10 @@ pub mod tickersix {
         instructions::round::handle_freeze_market_round(ctx)
     }
 
+    pub fn advance_market_round(ctx: Context<AdvanceMarketRound>) -> Result<()> {
+        instructions::round::handle_advance_market_round(ctx)
+    }
+
     pub fn create_rated_battle(
         ctx: Context<CreateRatedBattle>,
         battle_id: u64,

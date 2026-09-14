@@ -9,7 +9,7 @@ pub enum PriceSourceKind {
     VerifiedIssuerOracleV1,
 }
 
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, InitSpace)]
+#[derive(Debug, AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, InitSpace)]
 pub enum MarketRoundState {
     Preparing,
     Scheduled,
@@ -22,7 +22,7 @@ pub enum MarketRoundState {
     Voided,
 }
 
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, InitSpace)]
+#[derive(Debug, AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, InitSpace)]
 pub enum BattleMode {
     Ranked,
     League,

@@ -60,6 +60,7 @@ pub fn handle_create_market_round_draft(
 ) -> Result<()> {
     require_coordinator(&ctx.accounts.config, &ctx.accounts.coordinator)?;
     require!(!ctx.accounts.config.paused, ErrorCode::ProtocolPaused);
+    validate_eligibility_snapshot_hash(eligibility_snapshot_hash)?;
     require!(
         eligibility_frozen_at < queue_close_at
             && queue_close_at < commit_deadline
@@ -125,7 +126,11 @@ pub fn handle_create_market_round_draft(
 pub struct AddRoundAsset<'info> {
     #[account(seeds = [CONFIG_SEED], bump = config.bump)]
     pub config: Account<'info, Config>,
-    #[account(mut)]
+    #[account(
+        mut,
+        seeds = [MARKET_ROUND_SEED, &market_round.round_id.to_le_bytes()],
+        bump = market_round.bump
+    )]
     pub market_round: Account<'info, MarketRound>,
     #[account(mut)]
     pub coordinator: Signer<'info>,
@@ -254,7 +259,11 @@ pub fn handle_add_round_asset(
 pub struct FreezeMarketRound<'info> {
     #[account(seeds = [CONFIG_SEED], bump = config.bump)]
     pub config: Account<'info, Config>,
-    #[account(mut)]
+    #[account(
+        mut,
+        seeds = [MARKET_ROUND_SEED, &market_round.round_id.to_le_bytes()],
+        bump = market_round.bump
+    )]
     pub market_round: Account<'info, MarketRound>,
     #[account(
         seeds = [PRICE_POLICY_SEED, &market_round.price_policy_version.to_le_bytes()],
@@ -311,6 +320,28 @@ pub fn handle_freeze_market_round(ctx: Context<FreezeMarketRound>) -> Result<()>
         &ctx.accounts.market_quality_policy,
     )?;
     round.state = MarketRoundState::Scheduled;
+    Ok(())
+}
+
+#[derive(Accounts)]
+pub struct AdvanceMarketRound<'info> {
+    #[account(
+        mut,
+        seeds = [MARKET_ROUND_SEED, &market_round.round_id.to_le_bytes()],
+        bump = market_round.bump
+    )]
+    pub market_round: Account<'info, MarketRound>,
+    pub keeper: Signer<'info>,
+}
+
+/// Advances one clock-driven Market Round transition.
+///
+/// Transitions are deliberately single-step and permissionless. A keeper can
+/// retry the instruction safely, while each boundary remains explicit and
+/// cannot be skipped by a malformed timestamp or an out-of-order call.
+pub fn handle_advance_market_round(ctx: Context<AdvanceMarketRound>) -> Result<()> {
+    let next = next_market_round_state(&ctx.accounts.market_round, Clock::get()?.unix_timestamp)?;
+    ctx.accounts.market_round.state = next;
     Ok(())
 }
 
@@ -383,6 +414,33 @@ fn validate_round_assets(
     Ok(())
 }
 
+fn validate_eligibility_snapshot_hash(hash: [u8; 32]) -> Result<()> {
+    require!(hash != [0; 32], ErrorCode::InvalidEligibilitySnapshot);
+    Ok(())
+}
+
+fn next_market_round_state(round: &MarketRound, now: i64) -> Result<MarketRoundState> {
+    match round.state {
+        MarketRoundState::Scheduled => {
+            require!(now >= round.queue_close_at, ErrorCode::InvalidRoundState);
+            Ok(MarketRoundState::CommitOpen)
+        }
+        MarketRoundState::CommitOpen => {
+            require!(now >= round.commit_deadline, ErrorCode::InvalidRoundState);
+            Ok(MarketRoundState::RevealOpen)
+        }
+        MarketRoundState::RevealOpen => {
+            require!(now >= round.start_target_at, ErrorCode::InvalidRoundState);
+            Ok(MarketRoundState::Live)
+        }
+        MarketRoundState::Live => {
+            require!(now >= round.end_target_at, ErrorCode::InvalidRoundState);
+            Ok(MarketRoundState::Ended)
+        }
+        _ => err!(ErrorCode::InvalidRoundState),
+    }
+}
+
 fn require_coordinator(config: &Config, signer: &Signer) -> Result<()> {
     require_keys_eq!(
         config.coordinator_authority,
@@ -390,4 +448,52 @@ fn require_coordinator(config: &Config, signer: &Signer) -> Result<()> {
         ErrorCode::UnauthorizedCoordinator
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn round() -> MarketRound {
+        MarketRound {
+            round_id: 1,
+            registry_version: 1,
+            price_policy_version: 1,
+            market_quality_policy_version: 1,
+            attestor_set_version: 1,
+            market_quality_policy_hash: [1; 32],
+            eligibility_snapshot_hash: [2; 32],
+            eligibility_frozen_at: 10,
+            queue_close_at: 20,
+            commit_deadline: 30,
+            reveal_deadline: 40,
+            start_target_at: 50,
+            end_target_at: 60,
+            observation_window_secs: 10,
+            attestation_grace_secs: 10,
+            max_attestor_spread_bps: 100,
+            eligible_asset_bitmap: [1; 4],
+            round_asset_count: 1,
+            state: MarketRoundState::Scheduled,
+            is_replay: false,
+            bump: 1,
+        }
+    }
+
+    #[test]
+    fn market_round_state_advances_only_at_the_configured_boundary() {
+        let round = round();
+
+        assert!(next_market_round_state(&round, 19).is_err());
+        assert_eq!(
+            next_market_round_state(&round, 20).unwrap(),
+            MarketRoundState::CommitOpen
+        );
+    }
+
+    #[test]
+    fn eligibility_snapshot_hash_cannot_be_the_uninitialized_sentinel() {
+        assert!(validate_eligibility_snapshot_hash([0; 32]).is_err());
+        assert!(validate_eligibility_snapshot_hash([1; 32]).is_ok());
+    }
 }

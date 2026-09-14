@@ -76,10 +76,7 @@ pub fn handle_create_rated_battle(
         ErrorCode::UnauthorizedCoordinator
     );
     require!(!ctx.accounts.config.paused, ErrorCode::ProtocolPaused);
-    require!(
-        ctx.accounts.market_round.state == MarketRoundState::Scheduled,
-        ErrorCode::InvalidRoundState
-    );
+    validate_rated_battle_window(&ctx.accounts.market_round, Clock::get()?.unix_timestamp)?;
     require!(
         !ctx.accounts.market_round.is_replay,
         ErrorCode::ReplayCannotBeRated
@@ -112,10 +109,12 @@ pub fn handle_create_rated_battle(
         BattleMode::Ranked => require!(
             ctx.accounts.league_account.is_none()
                 && ctx.accounts.league_member_a.is_none()
-                && ctx.accounts.league_member_b.is_none(),
+                && ctx.accounts.league_member_b.is_none()
+                && league_round_no == 0,
             ErrorCode::InvalidRatedBattleMode
         ),
         BattleMode::League => {
+            require!(league_round_no > 0, ErrorCode::InvalidRatedBattleMode);
             let league_account = ctx
                 .accounts
                 .league_account
@@ -634,4 +633,64 @@ fn require_active_league_member(
     require_keys_eq!(member.league, league, ErrorCode::NotLeagueMember);
     require_keys_eq!(member.player, player, ErrorCode::NotLeagueMember);
     Ok(())
+}
+
+/// Enforces the only period in which a coordinator may admit a rated Battle.
+///
+/// A Market Round remains in its pre-start state while queue results are
+/// materialized. The clock check is therefore required in addition to the
+/// account state check: without it, a stale `Scheduled` account could accept
+/// new rated exposure after the commit deadline.
+fn validate_rated_battle_window(round: &MarketRound, now: i64) -> Result<()> {
+    require!(
+        matches!(
+            round.state,
+            MarketRoundState::Scheduled | MarketRoundState::CommitOpen
+        ),
+        ErrorCode::InvalidRoundState
+    );
+    require!(
+        now <= round.commit_deadline,
+        ErrorCode::RatedBattleWindowClosed
+    );
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn scheduled_round() -> MarketRound {
+        MarketRound {
+            round_id: 1,
+            registry_version: 1,
+            price_policy_version: 1,
+            market_quality_policy_version: 1,
+            attestor_set_version: 1,
+            market_quality_policy_hash: [1; 32],
+            eligibility_snapshot_hash: [2; 32],
+            eligibility_frozen_at: 10,
+            queue_close_at: 20,
+            commit_deadline: 30,
+            reveal_deadline: 40,
+            start_target_at: 50,
+            end_target_at: 60,
+            observation_window_secs: 10,
+            attestation_grace_secs: 10,
+            max_attestor_spread_bps: 100,
+            eligible_asset_bitmap: [1; 4],
+            round_asset_count: 1,
+            state: MarketRoundState::Scheduled,
+            is_replay: false,
+            bump: 1,
+        }
+    }
+
+    #[test]
+    fn rated_battle_creation_rejects_after_commit_deadline() {
+        let round = scheduled_round();
+
+        assert!(validate_rated_battle_window(&round, 30).is_ok());
+        assert!(validate_rated_battle_window(&round, 31).is_err());
+    }
 }

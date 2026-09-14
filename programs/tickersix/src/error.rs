@@ -30,8 +30,12 @@ pub enum ErrorCode {
     InvalidRoundState,
     #[msg("Market-round timing is not strictly ordered")]
     InvalidRoundTiming,
+    #[msg("Eligibility snapshot hash must commit to a non-empty snapshot")]
+    InvalidEligibilitySnapshot,
     #[msg("Market-round sequence or schedule overlaps an earlier official round")]
     InvalidRoundSequence,
+    #[msg("Rated Battle creation is outside the round admission window")]
+    RatedBattleWindowClosed,
     #[msg("Market round does not contain enough eligible assets")]
     InsufficientEligibleAssets,
     #[msg("Market-round asset identity is duplicated")]

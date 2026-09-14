@@ -213,6 +213,19 @@ pub fn handle_deactivate_league_member(ctx: Context<DeactivateLeagueMember>) -> 
         ctx.accounts.league.key(),
         ErrorCode::InvalidLeague
     );
+    let (expected_member, _) = Pubkey::find_program_address(
+        &[
+            LEAGUE_MEMBER_SEED,
+            ctx.accounts.league.key().as_ref(),
+            ctx.accounts.member.player.as_ref(),
+        ],
+        &crate::id(),
+    );
+    require_keys_eq!(
+        ctx.accounts.member.key(),
+        expected_member,
+        ErrorCode::NotLeagueMember
+    );
     require!(ctx.accounts.member.active, ErrorCode::NotLeagueMember);
     ctx.accounts.member.active = false;
     Ok(())
