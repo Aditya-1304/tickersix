@@ -1032,9 +1032,57 @@ fn attestation_requires_exact_native_signature_and_rejects_duplicate_report() {
         )
         .unwrap();
 
+    // A marker must not be able to suppress an available quorum simply by
+    // racing the permissionless finalizer after the deadline.
+    let premature_unavailable = harness.submit_transaction(
+        &coordinator,
+        &[Instruction {
+            program_id: address(tickersix::ID),
+            accounts: vec![
+                writable(round_asset),
+                readonly(round),
+                readonly(price_policy),
+                readonly(attestor_set),
+                writable_signer(coordinator_key),
+                readonly(price_attestation),
+                readonly(attestor_b_report),
+                readonly(attestor_c_report),
+            ],
+            data: tickersix::instruction::MarkPricePhaseUnavailable { phase }.data(),
+        }],
+        &[],
+    );
+    assert!(premature_unavailable.is_err());
+
+    // Finalization before the observation window plus grace period must fail;
+    // otherwise a caller could resolve a phase before late reports arrive.
+    harness.set_time(159, 159);
+    let early_finalize = harness.submit_transaction(
+        &coordinator,
+        &[Instruction {
+            program_id: address(tickersix::ID),
+            accounts: vec![
+                writable(round_asset),
+                readonly(round),
+                readonly(price_policy),
+                readonly(quality_policy),
+                readonly(attestor_set),
+                writable_signer(coordinator_key),
+                readonly(price_attestation),
+                readonly(attestor_b_report),
+                readonly(attestor_c_report),
+            ],
+            data: tickersix::instruction::FinalizePricePhase { phase }.data(),
+        }],
+        &[],
+    );
+    assert!(early_finalize.is_err());
+
     // The two compatible reports finalize to their checked integer midpoint;
     // once written, the phase cannot be finalized a second time.
-    harness.set_time(161, 161);
+    // A report was already freshness-checked at submission time. Delayed
+    // permissionless finalization must not make that accepted report stale.
+    harness.set_time(260, 260);
     harness.svm.expire_blockhash();
     let finalize_attempt = harness.submit_transaction(
         &coordinator,
@@ -1044,6 +1092,7 @@ fn attestation_requires_exact_native_signature_and_rejects_duplicate_report() {
                 writable(round_asset),
                 readonly(round),
                 readonly(price_policy),
+                readonly(quality_policy),
                 readonly(attestor_set),
                 writable_signer(coordinator_key),
                 readonly(price_attestation),
@@ -1068,6 +1117,7 @@ fn attestation_requires_exact_native_signature_and_rejects_duplicate_report() {
                 writable(round_asset),
                 readonly(round),
                 readonly(price_policy),
+                readonly(quality_policy),
                 readonly(attestor_set),
                 writable_signer(coordinator_key),
                 readonly(price_attestation),
@@ -1084,6 +1134,19 @@ fn attestation_requires_exact_native_signature_and_rejects_duplicate_report() {
     // supplied fallback data; it must transition to an explicit unavailable
     // state after the frozen deadline.
     let unavailable_asset = round_assets[1];
+    let unavailable_attestor_reports = [
+        attestor_a.pubkey(),
+        attestor_b.pubkey(),
+        attestor_c.pubkey(),
+    ]
+    .map(|attestor| {
+        pda(&[
+            tickersix::PRICE_ATTESTATION_SEED,
+            unavailable_asset.as_ref(),
+            &[phase as u8],
+            attestor.as_ref(),
+        ])
+    });
     let no_quorum_attempt = harness.submit_transaction(
         &coordinator,
         &[Instruction {
@@ -1092,8 +1155,12 @@ fn attestation_requires_exact_native_signature_and_rejects_duplicate_report() {
                 writable(unavailable_asset),
                 readonly(round),
                 readonly(price_policy),
+                readonly(quality_policy),
                 readonly(attestor_set),
                 writable_signer(coordinator_key),
+                readonly(unavailable_attestor_reports[0]),
+                readonly(unavailable_attestor_reports[1]),
+                readonly(unavailable_attestor_reports[2]),
             ],
             data: tickersix::instruction::FinalizePricePhase { phase }.data(),
         }],
@@ -1108,7 +1175,12 @@ fn attestation_requires_exact_native_signature_and_rejects_duplicate_report() {
             accounts: vec![
                 writable(unavailable_asset),
                 readonly(round),
+                readonly(price_policy),
+                readonly(attestor_set),
                 writable_signer(coordinator_key),
+                readonly(unavailable_attestor_reports[0]),
+                readonly(unavailable_attestor_reports[1]),
+                readonly(unavailable_attestor_reports[2]),
             ],
             data: tickersix::instruction::MarkPricePhaseUnavailable { phase }.data(),
         }],
@@ -1144,6 +1216,51 @@ fn attestation_requires_exact_native_signature_and_rejects_duplicate_report() {
         &[],
     );
     assert!(duplicate_attempt.is_err());
+}
+
+#[test]
+fn end_phase_requires_a_finalized_start_price() {
+    // Regression target: an end-phase finalizer must not resolve a price or
+    // report a generic quorum failure when the shared start price is absent.
+    let mut harness = Harness::new();
+    let (round, round_assets) = harness.create_and_freeze_round();
+    let round_asset = round_assets[0];
+    let price_policy = pda(&[tickersix::PRICE_POLICY_SEED, &1u16.to_le_bytes()]);
+    let quality_policy = pda(&[tickersix::QUALITY_POLICY_SEED, &1u16.to_le_bytes()]);
+    let attestor_set = pda(&[tickersix::ATTESTOR_SET_SEED, &1u16.to_le_bytes()]);
+    let coordinator = Arc::clone(&harness.coordinator);
+    let finalizer = key(&coordinator);
+
+    harness.set_time(171, 171);
+    harness.svm.expire_blockhash();
+    let attempt = harness.submit_transaction(
+        &coordinator,
+        &[Instruction {
+            program_id: address(tickersix::ID),
+            accounts: vec![
+                writable(round_asset),
+                readonly(round),
+                readonly(price_policy),
+                readonly(quality_policy),
+                readonly(attestor_set),
+                writable_signer(finalizer),
+            ],
+            data: tickersix::instruction::FinalizePricePhase {
+                phase: tickersix::PricePhase::End,
+            }
+            .data(),
+        }],
+        &[],
+    );
+
+    let error = attempt.unwrap_err();
+    assert!(
+        error.contains("InvalidBattleState"),
+        "unexpected error: {error}"
+    );
+    let asset = harness.account::<tickersix::RoundAsset>(round_asset);
+    assert!(!asset.end_finalized);
+    assert_eq!(asset.end_price_q9, 0);
 }
 
 #[test]

@@ -1,0 +1,20 @@
+[package]
+name = "relay"
+version = "0.1.0"
+description = "Transaction construction for TickerSix price-report relays"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+anchor-lang = "1.1.2"
+market-data = { path = "../market-data" }
+solana-address = "2.7.0"
+solana-hash = "4.6.0"
+solana-instruction = "3.0.1"
+solana-instructions-sysvar = "3.0.1"
+solana-keypair = "3.1.2"
+solana-message = "3.0.1"
+solana-sdk-ids = "3.1.0"
+solana-signer = "3.0.0"
+solana-transaction = { version = "3.0.2", features = ["bincode"] }
+tickersix = { path = "../../programs/tickersix", features = ["no-entrypoint"] }

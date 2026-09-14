@@ -6,6 +6,8 @@ rust-version.workspace = true
 
 [dependencies]
 aes-gcm = "0.10.3"
+bs58 = "0.5.1"
+hex = "0.4.3"
 market-data = { path = "../crates/market-data" }
 protocol = { path = "../crates/protocol" }
 serde = { version = "1.0.228", features = ["derive"] }

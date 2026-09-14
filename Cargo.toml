@@ -1,5 +1,5 @@
 [workspace]
-members = [ "backend", "crates/market-data", "crates/protocol",
+members = [ "backend", "crates/market-data", "crates/protocol", "crates/relay",
     "programs/*"
 ]
 resolver = "2"

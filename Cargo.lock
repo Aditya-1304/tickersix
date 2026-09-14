@@ -669,6 +669,8 @@ name = "backend"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
+ "bs58",
+ "hex",
  "market-data",
  "protocol",
  "serde",
@@ -1618,6 +1620,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "hex"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
+
+[[package]]
 name = "hmac"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2150,6 +2158,7 @@ checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 name = "market-data"
 version = "0.1.0"
 dependencies = [
+ "ed25519-dalek 2.2.0",
  "protocol",
  "reqwest",
  "serde",
@@ -2738,6 +2747,24 @@ name = "regex-syntax"
 version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
+
+[[package]]
+name = "relay"
+version = "0.1.0"
+dependencies = [
+ "anchor-lang",
+ "market-data",
+ "solana-address 2.7.0",
+ "solana-hash 4.6.0",
+ "solana-instruction 3.5.1",
+ "solana-instructions-sysvar",
+ "solana-keypair",
+ "solana-message",
+ "solana-sdk-ids",
+ "solana-signer",
+ "solana-transaction",
+ "tickersix",
+]
 
 [[package]]
 name = "reqwest"

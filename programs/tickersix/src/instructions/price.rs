@@ -4,7 +4,7 @@ use solana_sdk_ids::ed25519_program;
 
 use crate::{
     constants::{
-        ATTESTATION_DOMAIN, ATTESTOR_QUORUM, ATTESTOR_SET_SEED, MARKET_ROUND_SEED,
+        ATTESTATION_DOMAIN, ATTESTOR_COUNT, ATTESTOR_QUORUM, ATTESTOR_SET_SEED, MARKET_ROUND_SEED,
         PRICE_ATTESTATION_SEED, PRICE_POLICY_SEED, QUALITY_POLICY_SEED, ROUND_ASSET_SEED,
     },
     error::ErrorCode,
@@ -15,7 +15,7 @@ use crate::{
     },
 };
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct AttestationSummary {
     attestor: Pubkey,
     price_q9: i64,
@@ -139,12 +139,14 @@ pub fn handle_submit_price_attestation(
         ErrorCode::AttestorSetMismatch
     );
     require!(
-        ctx.accounts.attestor_set.quorum == ATTESTOR_QUORUM
-            && ctx
-                .accounts
-                .attestor_set
-                .attestors
-                .contains(&ctx.accounts.attestor.key()),
+        ctx.accounts.attestor_set.quorum == ATTESTOR_QUORUM,
+        ErrorCode::AttestorSetMismatch
+    );
+    require!(
+        ctx.accounts
+            .attestor_set
+            .attestors
+            .contains(&ctx.accounts.attestor.key()),
         ErrorCode::UnregisteredAttestor
     );
 
@@ -209,6 +211,11 @@ pub struct FinalizePricePhase<'info> {
     )]
     pub price_policy: Account<'info, PricePolicy>,
     #[account(
+        seeds = [QUALITY_POLICY_SEED, &market_round.market_quality_policy_version.to_le_bytes()],
+        bump = market_quality_policy.bump
+    )]
+    pub market_quality_policy: Account<'info, MarketQualityPolicy>,
+    #[account(
         seeds = [ATTESTOR_SET_SEED, &market_round.attestor_set_version.to_le_bytes()],
         bump = attestor_set.bump
     )]
@@ -227,24 +234,43 @@ pub fn handle_finalize_price_phase(
         .ok_or_else(|| error!(ErrorCode::MathOverflow))?;
     require!(now > deadline, ErrorCode::AttestationWindowClosed);
     require!(
-        ctx.accounts.round_asset.price_policy_version == ctx.accounts.price_policy.version,
+        ctx.accounts.round_asset.price_policy_version == ctx.accounts.price_policy.version
+            && ctx.accounts.market_round.price_policy_version == ctx.accounts.price_policy.version
+            && ctx.accounts.round_asset.price_source_kind == ctx.accounts.price_policy.source_kind,
         ErrorCode::PricePolicyMismatch
     );
     require!(
-        ctx.accounts.round_asset.price_source_kind == ctx.accounts.price_policy.source_kind,
-        ErrorCode::PricePolicyMismatch
+        ctx.accounts.market_round.market_quality_policy_version
+            == ctx.accounts.market_quality_policy.version
+            && ctx.accounts.round_asset.market_quality_policy_version
+                == ctx.accounts.market_quality_policy.version
+            && ctx.accounts.market_round.market_quality_policy_hash
+                == ctx.accounts.market_quality_policy.canonical_policy_hash,
+        ErrorCode::QualityPolicyMismatch
+    );
+    require!(
+        ctx.accounts.market_round.attestor_set_version == ctx.accounts.attestor_set.version
+            && ctx.accounts.attestor_set.quorum == ATTESTOR_QUORUM,
+        ErrorCode::AttestorSetMismatch
     );
     require!(
         !phase_is_finalized(&ctx.accounts.round_asset, phase)
             && !phase_is_unavailable(&ctx.accounts.round_asset, phase),
         ErrorCode::PricePhaseResolved
     );
+    if phase == PricePhase::End {
+        require!(
+            ctx.accounts.round_asset.start_finalized,
+            ErrorCode::InvalidBattleState
+        );
+    }
 
     let reports = read_attestation_summaries(
         ctx.remaining_accounts,
         ctx.accounts.round_asset.key(),
         phase,
         &ctx.accounts.attestor_set,
+        &ctx.accounts.price_policy,
     )?;
     let quorum =
         choose_compatible_quorum(&reports, ctx.accounts.market_round.max_attestor_spread_bps)?;
@@ -263,7 +289,6 @@ pub fn handle_finalize_price_phase(
             round_asset.end_finalized = true;
             round_asset.end_unavailable = false;
             round_asset.end_evidence_commitment = evidence_commitment;
-            require!(round_asset.start_finalized, ErrorCode::InvalidBattleState);
             round_asset.return_q9 =
                 return_q9(round_asset.start_price_q9, round_asset.end_price_q9)?;
         }
@@ -288,6 +313,16 @@ pub struct MarkPricePhaseUnavailable<'info> {
         bump = market_round.bump
     )]
     pub market_round: Account<'info, MarketRound>,
+    #[account(
+        seeds = [PRICE_POLICY_SEED, &market_round.price_policy_version.to_le_bytes()],
+        bump = price_policy.bump
+    )]
+    pub price_policy: Account<'info, PricePolicy>,
+    #[account(
+        seeds = [ATTESTOR_SET_SEED, &market_round.attestor_set_version.to_le_bytes()],
+        bump = attestor_set.bump
+    )]
+    pub attestor_set: Account<'info, AttestorSet>,
     pub marker: Signer<'info>,
 }
 
@@ -311,6 +346,39 @@ pub fn handle_mark_price_phase_unavailable(
         !phase_is_finalized(&ctx.accounts.round_asset, phase)
             && !phase_is_unavailable(&ctx.accounts.round_asset, phase),
         ErrorCode::PricePhaseResolved
+    );
+    require!(
+        ctx.accounts.round_asset.price_policy_version == ctx.accounts.price_policy.version
+            && ctx.accounts.market_round.price_policy_version == ctx.accounts.price_policy.version
+            && ctx.accounts.round_asset.price_source_kind == ctx.accounts.price_policy.source_kind,
+        ErrorCode::PricePolicyMismatch
+    );
+    require!(
+        ctx.accounts.market_round.attestor_set_version == ctx.accounts.attestor_set.version
+            && ctx.accounts.attestor_set.quorum == ATTESTOR_QUORUM,
+        ErrorCode::AttestorSetMismatch
+    );
+    require!(
+        ctx.remaining_accounts.len() == ATTESTOR_COUNT,
+        ErrorCode::InvalidAttestation
+    );
+    require_all_report_accounts_present(
+        ctx.remaining_accounts,
+        ctx.accounts.round_asset.key(),
+        phase,
+        &ctx.accounts.attestor_set,
+    )?;
+    let reports = read_attestation_summaries(
+        ctx.remaining_accounts,
+        ctx.accounts.round_asset.key(),
+        phase,
+        &ctx.accounts.attestor_set,
+        &ctx.accounts.price_policy,
+    )?;
+    require!(
+        choose_compatible_quorum(&reports, ctx.accounts.market_round.max_attestor_spread_bps)
+            .is_err(),
+        ErrorCode::NoCompatibleQuorum
     );
     match phase {
         PricePhase::Start => ctx.accounts.round_asset.start_unavailable = true,
@@ -350,10 +418,39 @@ fn read_attestation_summaries(
     round_asset: Pubkey,
     phase: PricePhase,
     attestor_set: &AttestorSet,
+    policy: &PricePolicy,
 ) -> Result<Vec<AttestationSummary>> {
     require!(accounts.len() <= 3, ErrorCode::InvalidAttestation);
     let mut reports = Vec::with_capacity(accounts.len());
-    for account in accounts {
+    for (index, account) in accounts.iter().enumerate() {
+        require!(
+            !accounts[..index]
+                .iter()
+                .any(|previous| previous.key == account.key),
+            ErrorCode::InvalidAttestation
+        );
+        // A report PDA that has never been initialized is represented by the
+        // system program with empty data. It is a valid missing-attestor input
+        // during fail-closed resolution and must not be deserialized as a
+        // TickerSix account.
+        if account.owner == &anchor_lang::solana_program::system_program::ID
+            && account.data_is_empty()
+        {
+            let is_expected_missing_report = attestor_set.attestors.iter().any(|attestor| {
+                let (expected_key, _) = Pubkey::find_program_address(
+                    &[
+                        PRICE_ATTESTATION_SEED,
+                        round_asset.as_ref(),
+                        &[phase as u8],
+                        attestor.as_ref(),
+                    ],
+                    &crate::id(),
+                );
+                *account.key == expected_key
+            });
+            require!(is_expected_missing_report, ErrorCode::InvalidAttestation);
+            continue;
+        }
         require_keys_eq!(*account.owner, crate::id(), ErrorCode::InvalidAttestation);
         let data = account.try_borrow_data()?;
         let mut slice: &[u8] = &data;
@@ -361,6 +458,17 @@ fn read_attestation_summaries(
             .map_err(|_| error!(ErrorCode::InvalidAttestation))?;
         require_keys_eq!(report.round_asset, round_asset, ErrorCode::WrongMarketRound);
         require!(report.phase == phase, ErrorCode::InvalidAttestation);
+        require!(
+            report.median_price_q9 > 0,
+            ErrorCode::InvalidAttestationEvidence
+        );
+        require!(
+            report.accepted_observation_count >= policy.min_accepted_observations
+                && report.unique_source_block_count >= policy.min_unique_source_blocks
+                && report.unique_source_block_count <= report.accepted_observation_count
+                && report.first_source_block_id <= report.last_source_block_id,
+            ErrorCode::InvalidAttestationEvidence
+        );
         require!(
             attestor_set.attestors.contains(&report.attestor),
             ErrorCode::UnregisteredAttestor
@@ -387,11 +495,31 @@ fn read_attestation_summaries(
             evidence_root: report.evidence_root,
         });
     }
-    require!(
-        reports.len() >= usize::from(ATTESTOR_QUORUM),
-        ErrorCode::NoCompatibleQuorum
-    );
     Ok(reports)
+}
+
+fn require_all_report_accounts_present(
+    accounts: &[AccountInfo<'_>],
+    round_asset: Pubkey,
+    phase: PricePhase,
+    attestor_set: &AttestorSet,
+) -> Result<()> {
+    for attestor in attestor_set.attestors {
+        let (expected_key, _) = Pubkey::find_program_address(
+            &[
+                PRICE_ATTESTATION_SEED,
+                round_asset.as_ref(),
+                &[phase as u8],
+                attestor.as_ref(),
+            ],
+            &crate::id(),
+        );
+        require!(
+            accounts.iter().any(|account| *account.key == expected_key),
+            ErrorCode::InvalidAttestation
+        );
+    }
+    Ok(())
 }
 
 fn choose_compatible_quorum(
@@ -580,4 +708,42 @@ fn verify_ed25519_instruction(
 
 fn read_u16(data: &[u8], offset: usize) -> u16 {
     u16::from_le_bytes([data[offset], data[offset + 1]])
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn summary(attestor_byte: u8, price_q9: i64) -> AttestationSummary {
+        AttestationSummary {
+            attestor: Pubkey::new_from_array([attestor_byte; 32]),
+            price_q9,
+            evidence_root: [attestor_byte; 32],
+        }
+    }
+
+    #[test]
+    fn compatible_quorum_uses_three_report_median_and_ignores_input_order() {
+        let ordered = [summary(3, 102), summary(1, 100), summary(2, 101)];
+        let reversed = [summary(2, 101), summary(3, 102), summary(1, 100)];
+
+        let left = choose_compatible_quorum(&ordered, 200).unwrap();
+        let right = choose_compatible_quorum(&reversed, 200).unwrap();
+
+        assert_eq!(left.finalized_price_q9, 101);
+        assert_eq!(left.selected, right.selected);
+        assert_eq!(left.finalized_price_q9, right.finalized_price_q9);
+    }
+
+    #[test]
+    fn compatible_quorum_prefers_the_narrowest_equal_sized_cluster() {
+        let reports = [summary(1, 100), summary(2, 101), summary(3, 110)];
+
+        let result = choose_compatible_quorum(&reports, 500).unwrap();
+
+        assert_eq!(result.finalized_price_q9, 100);
+        assert_eq!(result.selected.len(), 2);
+        assert_eq!(result.selected[0].attestor, Pubkey::new_from_array([1; 32]));
+        assert_eq!(result.selected[1].attestor, Pubkey::new_from_array([2; 32]));
+    }
 }

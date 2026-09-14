@@ -20,6 +20,7 @@ use market_data::{
 };
 use serde::{Deserialize, Serialize};
 
+pub mod attestor;
 pub mod recovery;
 
 const DEFAULT_ITERATIONS: usize = 1;
@@ -62,6 +63,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Some("phase0-record") => record_phase0().await?,
         Some("phase0-metadata") => record_phase0_metadata().await?,
         Some("phase0-analyze") => analyze_phase0()?,
+        Some("attestor-run") => attestor::run().await?,
         _ => print_usage(),
     }
 
@@ -327,6 +329,7 @@ fn print_usage() {
          Optional: TICKERSIX_JUPITER_API_KEY, TICKERSIX_PHASE0_OUTPUT,\n\
          TICKERSIX_PHASE0_ATTESTOR_ID, TICKERSIX_PHASE0_ATTESTOR_INDEX,\n\
          TICKERSIX_PHASE0_ITERATIONS, TICKERSIX_PHASE0_SAMPLE_INTERVAL_SECS\n\n\
-         Analysis: cargo run -p backend -- phase0-analyze phase0/attestor-0.ndjson"
+         Analysis: cargo run -p backend -- phase0-analyze phase0/attestor-0.ndjson\n\
+         Phase 2 attestor: TICKERSIX_ATTESTOR_CONFIG=attestor.json \\\n+         cargo run -p backend -- attestor-run"
     );
 }

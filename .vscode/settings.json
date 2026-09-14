@@ -1,0 +1,7 @@
+{
+  // Anchor generates client and CPI helpers behind the `cpi` feature. Keep
+  // that feature enabled for editor analysis without changing deployment
+  // defaults or the feature set used by the on-chain program build.
+  "rust-analyzer.cargo.features": ["cpi"],
+  "rust-analyzer.check.features": ["cpi"]
+}
