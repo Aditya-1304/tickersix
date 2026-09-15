@@ -1,9 +1,9 @@
 use market_data::{
     build_attestor_price_report, build_canonical_price_report, parse_jupiter_price_response,
-    parse_jupiter_token_response, read_jsonl, stagger_offsets_millis, summarize_phase0_window,
+    parse_jupiter_token_response, read_jsonl, stagger_offsets_millis, summarize_observation_window,
     validate_batched_sampling_plan, validate_sampling_plan, AcceptedPriceSample,
     AttestorEvidencePolicy, AttestorReportError, AttestorSigner, CanonicalPriceReport,
-    EvidenceBatchRecord, EvidenceLedger, JsonlStore, JupiterParseError, Phase0Observation,
+    EvidenceBatchRecord, EvidenceLedger, JsonlStore, JupiterParseError, MarketDataObservation,
     PriceReportContext, SamplingPlanError, MAX_PRICE_REQUEST_MINTS,
 };
 
@@ -105,17 +105,17 @@ fn token_information_keeps_exact_mint_identity_and_reports_metadata() {
 }
 
 #[test]
-fn phase0_summary_separates_stale_polls_from_independent_source_blocks() {
+fn observation_summary_separates_stale_polls_from_independent_source_blocks() {
     let requested = vec!["mint_a".to_owned(), "mint_b".to_owned()];
     let observations = vec![
-        Phase0Observation::new("attestor-a", "mint_a", 100, 1, 0),
-        Phase0Observation::new("attestor-a", "mint_a", 101, 1, 1_000),
-        Phase0Observation::new("attestor-a", "mint_a", 102, 2, 2_000),
-        Phase0Observation::new("attestor-b", "mint_a", 103, 1, 3_000),
-        Phase0Observation::new("attestor-a", "mint_a", 104, 3, 60_000),
+        MarketDataObservation::new("attestor-a", "mint_a", 100, 1, 0),
+        MarketDataObservation::new("attestor-a", "mint_a", 101, 1, 1_000),
+        MarketDataObservation::new("attestor-a", "mint_a", 102, 2, 2_000),
+        MarketDataObservation::new("attestor-b", "mint_a", 103, 1, 3_000),
+        MarketDataObservation::new("attestor-a", "mint_a", 104, 3, 60_000),
     ];
 
-    let summary = summarize_phase0_window(&requested, &observations, 0, 60).unwrap();
+    let summary = summarize_observation_window(&requested, &observations, 0, 60).unwrap();
     assert_eq!(summary.total_observations, 4);
     assert_eq!(summary.assets[0].unique_source_block_count, 3);
     assert_eq!(summary.assets[0].stale_observation_count, 1);

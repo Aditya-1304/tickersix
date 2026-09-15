@@ -1,4 +1,4 @@
-//! Phase 3.2 Ranked queue, cutoff snapshots, and coordinator admission.
+//! Ranked queue, cutoff snapshots, and coordinator admission.
 //!
 //! This module owns off-chain scheduling and pairing only. The Anchor program
 //! remains the final authority for rated exposure: the coordinator transaction
@@ -17,7 +17,7 @@ use sqlx::{postgres::PgRow, PgPool, Postgres, Row, Transaction};
 use crate::auth::parse_wallet;
 
 pub const PAIRING_POLICY_VERSION: i32 = 1;
-pub const RATING_FORMULA_VERSION: u16 = 1;
+pub use crate::rating::RATING_FORMULA_VERSION;
 pub const RECENT_REMATCH_WINDOW: i64 = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -580,20 +580,45 @@ pub async fn confirm_coordinator_battle(
     ) {
         return Err(RankedError::CoordinatorConflict);
     }
-    sqlx::query(
+    let battle_insert = sqlx::query(
         "INSERT INTO battles
             (chain_pubkey, market_round_id, mode, rated, player_a, player_b,
-             state, indexed_at)
-         VALUES ($1, $2, 'RANKED', TRUE, $3, $4, 'CREATED', $5)",
+             state, indexed_at, rating_a_before, rating_b_before,
+             rating_formula_version)
+         VALUES ($1, $2, 'RANKED', TRUE, $3, $4, 'CREATED', $5, $6, $7, $8)
+         ON CONFLICT (chain_pubkey) DO UPDATE SET
+             rating_a_before = COALESCE(battles.rating_a_before, EXCLUDED.rating_a_before),
+             rating_b_before = COALESCE(battles.rating_b_before, EXCLUDED.rating_b_before),
+             rating_formula_version = COALESCE(
+                 battles.rating_formula_version,
+                 EXCLUDED.rating_formula_version
+             )
+         WHERE battles.market_round_id = EXCLUDED.market_round_id
+           AND battles.player_a = EXCLUDED.player_a
+           AND battles.player_b = EXCLUDED.player_b
+           AND battles.rated
+           AND battles.mode = 'RANKED'",
     )
     .bind(battle_pubkey)
     .bind(market_round_id)
     .bind(&player_a)
     .bind(&player_b)
     .bind(now)
+    .bind(
+        row.try_get::<i32, _>("rating_a_snapshot")
+            .map_err(storage_error)?,
+    )
+    .bind(
+        row.try_get::<i32, _>("rating_b_snapshot")
+            .map_err(storage_error)?,
+    )
+    .bind(i32::from(RATING_FORMULA_VERSION))
     .execute(&mut *transaction)
     .await
     .map_err(storage_error)?;
+    if battle_insert.rows_affected() != 1 {
+        return Err(RankedError::CoordinatorConflict);
+    }
 
     for wallet in [&player_a, &player_b] {
         let result = sqlx::query(
@@ -752,7 +777,7 @@ async fn load_queue_entry(
         wallet: row.try_get("wallet").map_err(storage_error)?,
         status: row.try_get("status").map_err(storage_error)?,
         current_rating,
-        tier: rating_tier(current_rating, current_rated_games).to_owned(),
+        tier: crate::rating::rating_tier(current_rating, current_rated_games).to_owned(),
         matchmaking_rating_status: "SNAPSHOTS_AT_QUEUE_CLOSE",
         rating_snapshot: row.try_get("rating_snapshot").map_err(storage_error)?,
         rating_snapshot_at: row.try_get("rating_snapshot_at").map_err(storage_error)?,
@@ -760,26 +785,6 @@ async fn load_queue_entry(
         queue_closes_at: row.try_get("queue_close_at").map_err(storage_error)?,
         start_target_at: row.try_get("start_target_at").map_err(storage_error)?,
     })
-}
-
-fn rating_tier(rating: i32, rated_games: i32) -> &'static str {
-    if rated_games < 5 {
-        "UNRANKED"
-    } else if rating < 1400 {
-        "BRONZE"
-    } else if rating < 1550 {
-        "SILVER"
-    } else if rating < 1700 {
-        "GOLD"
-    } else if rating < 1850 {
-        "PLATINUM"
-    } else if rating < 2000 {
-        "DIAMOND"
-    } else if rating < 2200 {
-        "MASTER"
-    } else {
-        "GRANDMASTER"
-    }
 }
 
 /// Reconstructs the canonical active-season rating at the immutable pairing

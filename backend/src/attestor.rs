@@ -1,11 +1,11 @@
-//! Phase 2.1 attestor worker.
+//! Attestor worker.
 //!
 //! Each worker owns one registered Ed25519 attestor key, samples the complete
 //! frozen Round Asset mint batch through Jupiter, appends every response to a
 //! durable evidence log, and emits one signed report per asset and phase. The
 //! worker never selects an issuer, changes a mint, or performs on-chain
 //! settlement; those responsibilities remain in the frozen round and the
-//! Phase 2.2 relay/finalization path.
+//! relay/finalization path.
 
 use std::{
     collections::BTreeSet,
@@ -94,9 +94,10 @@ impl AttestorConfig {
             return Err("phase must be 0 (START) or 1 (END)".into());
         }
         if raw.attestor_count != REQUIRED_ATTESTOR_COUNT {
-            return Err(
-                format!("Phase 2 requires exactly {REQUIRED_ATTESTOR_COUNT} attestors").into(),
-            );
+            return Err(format!(
+                "attestor quorum requires exactly {REQUIRED_ATTESTOR_COUNT} attestors"
+            )
+            .into());
         }
         if raw.attestor_index >= raw.attestor_count {
             return Err("attestor_index must be less than attestor_count".into());

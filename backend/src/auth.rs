@@ -1,4 +1,4 @@
-//! Wallet-signed authentication for the Phase 3 backend.
+//! Wallet-signed authentication for the TickerSix backend.
 //!
 //! The server authenticates a wallet by verifying a canonical challenge with
 //! the wallet's Ed25519 public key. A wallet address in an HTTP body is never

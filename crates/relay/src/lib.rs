@@ -1,4 +1,4 @@
-//! Client-side construction for the Phase 2.2 price-report relay path.
+//! Client-side construction for the price-report relay path.
 //!
 //! The relay is intentionally a transaction builder, not a key custodian. An
 //! attestor signs a report in the market-data worker, while any relayer can

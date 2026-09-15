@@ -1,4 +1,5 @@
-//! Jupiter market-data adapter used by Phase 0 and the future attestor workers.
+//! Jupiter market-data adapter used by the evidence recorder and attestor
+//! workers.
 //!
 //! The adapter stops at normalized observations. It does not decide eligibility,
 //! sign reports, or settle a Battle. Keeping those responsibilities separate
@@ -50,7 +51,7 @@ pub struct PriceBatch {
     pub request_completed_at_unix_ms: i64,
     #[serde(default)]
     pub http_status: u16,
-    /// The exact response body retained for the Phase 0 evidence record.
+    /// The exact response body retained for the evidence record.
     #[serde(skip_serializing, skip_deserializing, default)]
     pub raw_response: String,
 }
@@ -91,9 +92,9 @@ pub struct JupiterTokenBatch {
     pub raw_response: String,
 }
 
-/// One normalized observation loaded from a Phase 0 recorder file.
+/// One normalized observation loaded from a market-data recorder file.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct Phase0Observation {
+pub struct MarketDataObservation {
     pub attestor_id: String,
     pub mint: String,
     pub price_q9: i64,
@@ -146,8 +147,8 @@ pub struct PriceReportContext {
 /// Calibrated evidence requirements copied into a report-building worker.
 ///
 /// These values are deliberately supplied by the frozen PricePolicy rather
-/// than invented by the attestor. Phase 0 is responsible for choosing and
-/// versioning them before a rated round is opened.
+/// than invented by the attestor. A policy review is responsible for choosing
+/// and versioning them before a rated round is opened.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AttestorEvidencePolicy {
     pub min_accepted_observations: u16,
@@ -665,7 +666,7 @@ pub fn build_attestor_price_report(
     })
 }
 
-impl Phase0Observation {
+impl MarketDataObservation {
     pub fn new(
         attestor_id: impl Into<String>,
         mint: impl Into<String>,
@@ -683,9 +684,9 @@ impl Phase0Observation {
     }
 }
 
-/// Per-mint facts reported by the Phase 0 analyzer.
+/// Per-mint facts reported by the market-data analyzer.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Phase0AssetSummary {
+pub struct AssetCoverageSummary {
     pub mint: String,
     pub missing: bool,
     pub observation_count: usize,
@@ -703,41 +704,41 @@ pub struct Phase0AssetSummary {
 /// human or separately versioned policy review must choose calibrated minimums
 /// before a rated Market Round can use them.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Phase0WindowSummary {
+pub struct ObservationWindowSummary {
     pub window_start_unix_ms: i64,
     pub window_end_unix_ms: i64,
     pub window_secs: u64,
     pub total_observations: usize,
-    pub assets: Vec<Phase0AssetSummary>,
+    pub assets: Vec<AssetCoverageSummary>,
 }
 
 /// Summarizes coverage, repeated source blocks, attestor participation, and
 /// observed price range without fabricating eligibility thresholds.
-pub fn summarize_phase0_window(
+pub fn summarize_observation_window(
     requested_mints: &[String],
-    observations: &[Phase0Observation],
+    observations: &[MarketDataObservation],
     window_start_unix_ms: i64,
     window_secs: u64,
-) -> Result<Phase0WindowSummary, JupiterParseError> {
+) -> Result<ObservationWindowSummary, JupiterParseError> {
     if requested_mints.is_empty() || window_secs == 0 {
         return Err(JupiterParseError::InvalidRequest(
-            "Phase 0 summary requires mints and a non-zero window".to_owned(),
+            "observation summary requires mints and a non-zero window".to_owned(),
         ));
     }
     let window_millis = window_secs.checked_mul(1_000).ok_or_else(|| {
-        JupiterParseError::InvalidRequest("Phase 0 window is too large".to_owned())
+        JupiterParseError::InvalidRequest("observation window is too large".to_owned())
     })?;
     let window_end_unix_ms = window_start_unix_ms
         .checked_add(i64::try_from(window_millis).map_err(|_| {
-            JupiterParseError::InvalidRequest("Phase 0 window is too large".to_owned())
+            JupiterParseError::InvalidRequest("observation window is too large".to_owned())
         })?)
         .ok_or_else(|| {
-            JupiterParseError::InvalidRequest("Phase 0 window overflows time".to_owned())
+            JupiterParseError::InvalidRequest("observation window overflows time".to_owned())
         })?;
     validate_requested_mints(requested_mints)?;
 
     let requested: BTreeSet<&str> = requested_mints.iter().map(String::as_str).collect();
-    let mut grouped: BTreeMap<&str, Vec<&Phase0Observation>> = requested_mints
+    let mut grouped: BTreeMap<&str, Vec<&MarketDataObservation>> = requested_mints
         .iter()
         .map(|mint| (mint.as_str(), Vec::new()))
         .collect();
@@ -791,7 +792,7 @@ pub fn summarize_phase0_window(
             }
             _ => None,
         };
-        assets.push(Phase0AssetSummary {
+        assets.push(AssetCoverageSummary {
             mint: mint.clone(),
             missing: observation_count == 0,
             observation_count,
@@ -804,7 +805,7 @@ pub fn summarize_phase0_window(
         });
     }
 
-    Ok(Phase0WindowSummary {
+    Ok(ObservationWindowSummary {
         window_start_unix_ms,
         window_end_unix_ms,
         window_secs,

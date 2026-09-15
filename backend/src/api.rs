@@ -1,15 +1,18 @@
-//! Axum HTTP surface for Phase 3.1.
+//! Axum HTTP surface for the TickerSix backend.
 //!
 //! Handlers are deliberately thin: authentication and profile invariants live
 //! in dedicated modules, while this layer translates HTTP input/output and
 //! keeps storage errors away from clients.
 
-use std::{env, error::Error, fmt, sync::Arc};
+use std::{env, error::Error, fmt, sync::Arc, time::Duration};
 
 use axum::{
     extract::{Path, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
-    response::{IntoResponse, Response},
+    response::{
+        sse::{KeepAlive, Sse},
+        IntoResponse, Response,
+    },
     routing::{get, post, put},
     Json, Router,
 };
@@ -20,6 +23,8 @@ use tokio::net::TcpListener;
 use crate::{
     auth::{self, AuthError},
     db,
+    leaderboard::{self, LeaderboardError},
+    live::{self, LiveError},
     profile::{self, ProfileError, ProfileUpdate},
     ranked::{self, RankedError},
 };
@@ -56,10 +61,13 @@ pub fn router(state: ApiState) -> Router {
             post(join_ranked_queue).delete(leave_ranked_queue),
         )
         .route("/v1/ranked/status", get(get_ranked_status))
+        .route("/v1/leaderboards/global", get(get_global_leaderboard))
+        .route("/v1/leaderboards/global/me", get(get_my_leaderboard))
+        .route("/v1/stream/battles/:pubkey", get(stream_battle))
         .with_state(state)
 }
 
-/// Starts the Phase 3.1 HTTP service from runtime configuration.
+/// Starts the HTTP service from runtime configuration.
 ///
 /// Database credentials, authentication domain, and cookie security are
 /// intentionally environment-owned. No key material or database secret is
@@ -95,6 +103,8 @@ struct ErrorBody {
 #[derive(Debug)]
 pub enum ApiError {
     Auth(AuthError),
+    Leaderboard(LeaderboardError),
+    Live(LiveError),
     Profile(ProfileError),
     Ranked(RankedError),
     DomainMismatch,
@@ -104,6 +114,8 @@ impl fmt::Display for ApiError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Auth(error) => write!(formatter, "{error}"),
+            Self::Leaderboard(error) => write!(formatter, "{error}"),
+            Self::Live(error) => write!(formatter, "{error}"),
             Self::Profile(error) => write!(formatter, "{error}"),
             Self::Ranked(error) => write!(formatter, "{error}"),
             Self::DomainMismatch => {
@@ -128,6 +140,16 @@ impl IntoResponse for ApiError {
             | Self::Profile(ProfileError::InvalidDisplayName)
             | Self::Profile(ProfileError::InvalidAvatarUrl) => StatusCode::BAD_REQUEST,
             Self::Profile(ProfileError::NotFound) => StatusCode::NOT_FOUND,
+            Self::Leaderboard(LeaderboardError::NoActiveSeason | LeaderboardError::NotFound) => {
+                StatusCode::NOT_FOUND
+            }
+            Self::Leaderboard(
+                LeaderboardError::InvalidWallet
+                | LeaderboardError::InvalidCursor
+                | LeaderboardError::InvalidLimit,
+            ) => StatusCode::BAD_REQUEST,
+            Self::Live(LiveError::NotFound) => StatusCode::NOT_FOUND,
+            Self::Live(LiveError::InvalidBattle) => StatusCode::BAD_REQUEST,
             Self::Ranked(RankedError::RoundNotFound | RankedError::QueueNotFound) => {
                 StatusCode::NOT_FOUND
             }
@@ -148,6 +170,8 @@ impl IntoResponse for ApiError {
             Self::Auth(AuthError::Storage(_)) | Self::Profile(ProfileError::Storage(_)) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
+            Self::Leaderboard(LeaderboardError::Storage(_)) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::Live(LiveError::Storage(_)) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Ranked(RankedError::Storage(_)) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (
@@ -169,6 +193,18 @@ impl From<AuthError> for ApiError {
 impl From<ProfileError> for ApiError {
     fn from(error: ProfileError) -> Self {
         Self::Profile(error)
+    }
+}
+
+impl From<LeaderboardError> for ApiError {
+    fn from(error: LeaderboardError) -> Self {
+        Self::Leaderboard(error)
+    }
+}
+
+impl From<LiveError> for ApiError {
+    fn from(error: LiveError) -> Self {
+        Self::Live(error)
     }
 }
 
@@ -206,6 +242,12 @@ struct RankedQueueRequest {
 #[derive(Debug, Deserialize, Default)]
 struct RankedStatusQuery {
     market_round_id: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct LeaderboardQuery {
+    cursor: Option<String>,
+    limit: Option<i64>,
 }
 
 async fn health() -> Json<serde_json::Value> {
@@ -359,6 +401,43 @@ async fn get_ranked_status(
     ))
 }
 
+async fn get_global_leaderboard(
+    State(state): State<ApiState>,
+    Query(query): Query<LeaderboardQuery>,
+) -> Result<Json<leaderboard::LeaderboardPage>, ApiError> {
+    Ok(Json(
+        leaderboard::global_leaderboard(
+            &state.pool,
+            query.cursor.as_deref(),
+            query.limit.unwrap_or(leaderboard::DEFAULT_PAGE_SIZE),
+        )
+        .await?,
+    ))
+}
+
+async fn get_my_leaderboard(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> Result<Json<leaderboard::LeaderboardMe>, ApiError> {
+    let wallet = authenticated_wallet(&state, &headers).await?;
+    Ok(Json(
+        leaderboard::leaderboard_me(&state.pool, &wallet).await?,
+    ))
+}
+
+async fn stream_battle(
+    State(state): State<ApiState>,
+    Path(battle_pubkey): Path<String>,
+) -> Result<impl IntoResponse, ApiError> {
+    live::ensure_battle(&state.pool, &battle_pubkey).await?;
+    let stream = live::battle_stream(state.pool, battle_pubkey);
+    Ok(Sse::new(stream).keep_alive(
+        KeepAlive::new()
+            .interval(Duration::from_secs(15))
+            .text("keepalive"),
+    ))
+}
+
 async fn authenticated_wallet(state: &ApiState, headers: &HeaderMap) -> Result<String, ApiError> {
     let token = session_from_headers(headers).ok_or(AuthError::SessionExpired)?;
     Ok(auth::authenticated_wallet(&state.pool, token, auth::unix_now()).await?)
@@ -387,6 +466,15 @@ fn error_code(error: &ApiError) -> &'static str {
         ApiError::Auth(AuthError::Storage(_)) | ApiError::Profile(ProfileError::Storage(_)) => {
             "INTERNAL_ERROR"
         }
+        ApiError::Leaderboard(LeaderboardError::Storage(_)) => "INTERNAL_ERROR",
+        ApiError::Leaderboard(LeaderboardError::NoActiveSeason) => "NO_ACTIVE_SEASON",
+        ApiError::Leaderboard(LeaderboardError::NotFound) => "PROFILE_NOT_FOUND",
+        ApiError::Leaderboard(LeaderboardError::InvalidWallet) => "INVALID_WALLET",
+        ApiError::Leaderboard(LeaderboardError::InvalidCursor) => "INVALID_CURSOR",
+        ApiError::Leaderboard(LeaderboardError::InvalidLimit) => "INVALID_LIMIT",
+        ApiError::Live(LiveError::InvalidBattle) => "INVALID_BATTLE",
+        ApiError::Live(LiveError::NotFound) => "BATTLE_NOT_FOUND",
+        ApiError::Live(LiveError::Storage(_)) => "INTERNAL_ERROR",
         ApiError::Ranked(RankedError::Storage(_)) => "INTERNAL_ERROR",
         ApiError::Ranked(RankedError::RoundNotFound) => "ROUND_NOT_FOUND",
         ApiError::Ranked(RankedError::QueueNotFound) => "QUEUE_NOT_FOUND",

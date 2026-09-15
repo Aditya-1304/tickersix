@@ -1,4 +1,4 @@
-//! Player-profile and rating read models for the Phase 3.1 API.
+//! Player-profile and rating read models for the backend API.
 //!
 //! Profiles are intentionally small. Wallet identity and competitive state are
 //! kept separate so cosmetic edits cannot mutate rating history or on-chain

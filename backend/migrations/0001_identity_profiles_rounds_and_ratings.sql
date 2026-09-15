@@ -1,4 +1,4 @@
--- Phase 3.1 canonical backend schema.
+-- Canonical backend schema for identity, profiles, rounds, battles, and ratings.
 --
 -- Solana accounts remain competitive authority. These tables are durable
 -- projections, authentication state, and auditable off-chain rating state.

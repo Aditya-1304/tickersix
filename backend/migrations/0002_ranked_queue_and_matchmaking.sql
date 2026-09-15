@@ -1,7 +1,7 @@
--- Phase 3.2 ranked queue and coordinator-admission state.
+-- Ranked queue and coordinator-admission state.
 --
 -- League reservations are intentionally only a blocker contract here. Swiss
--- pairing and League lifecycle remain Phase 4 responsibilities.
+-- pairing and League lifecycle remain future responsibilities.
 
 CREATE TABLE IF NOT EXISTS ranked_queue (
     market_round_id BIGINT NOT NULL REFERENCES market_rounds(id),

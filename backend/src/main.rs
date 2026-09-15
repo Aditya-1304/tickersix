@@ -1,8 +1,8 @@
 //! Backend entry points that are safe to run before the production API exists.
 //!
-//! Phase 0 deliberately ships as a small recorder command. It gathers the
-//! evidence needed to calibrate Market Quality Policy values without silently
-//! turning unmeasured assumptions into rated-round configuration.
+//! The market-data recorder gathers the evidence needed to calibrate Market
+//! Quality Policy values without silently turning unmeasured assumptions into
+//! rated-round configuration.
 
 use std::{
     collections::BTreeSet,
@@ -15,8 +15,8 @@ use std::{
 };
 
 use market_data::{
-    stagger_offsets_millis, summarize_phase0_window, validate_sampling_plan, JupiterClient,
-    Phase0Observation, PriceBatch,
+    stagger_offsets_millis, summarize_observation_window, validate_sampling_plan, JupiterClient,
+    MarketDataObservation, PriceBatch,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPoolOptions;
@@ -26,9 +26,12 @@ pub mod attestor;
 pub mod auth;
 pub mod db;
 pub mod indexer;
+pub mod leaderboard;
+pub mod live;
 pub mod profile;
 pub mod proof;
 pub mod ranked;
+pub mod rating;
 pub mod recovery;
 pub mod settlement;
 
@@ -69,12 +72,13 @@ struct RecorderConfig {
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
     match env::args().nth(1).as_deref() {
-        Some("phase0-record") => record_phase0().await?,
-        Some("phase0-metadata") => record_phase0_metadata().await?,
-        Some("phase0-analyze") => analyze_phase0()?,
+        Some("record-market-data") => record_market_data().await?,
+        Some("record-token-metadata") => record_token_metadata().await?,
+        Some("analyze-market-data") => analyze_market_data()?,
         Some("attestor-run") => attestor::run().await?,
         Some("api-serve") => api::serve_from_env().await?,
         Some("ranked-match") => run_ranked_match().await?,
+        Some("rating-apply") => run_rating_apply().await?,
         Some("proof-serve") => {
             let path = env::args()
                 .nth(2)
@@ -96,11 +100,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// Captures exact-mint Tokens V2 metadata as a separate immutable Phase 0
-/// evidence artifact. Metadata is review input; it never discovers or replaces
-/// the issuer-approved registry automatically.
-async fn record_phase0_metadata() -> Result<(), Box<dyn Error>> {
-    let mints = required_csv("TICKERSIX_PHASE0_MINTS")?;
+/// Captures exact-mint Tokens V2 metadata as a separate immutable evidence
+/// artifact. Metadata is review input; it never discovers or replaces the
+/// issuer-approved registry automatically.
+async fn record_token_metadata() -> Result<(), Box<dyn Error>> {
+    let mints = required_csv("TICKERSIX_MARKET_DATA_MINTS")?;
     let api_key = env::var("TICKERSIX_JUPITER_API_KEY").ok();
     let base_url = env::var("TICKERSIX_JUPITER_BASE_URL")
         .unwrap_or_else(|_| market_data::DEFAULT_JUPITER_BASE_URL.to_owned());
@@ -127,6 +131,19 @@ async fn run_ranked_match() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+async fn run_rating_apply() -> Result<(), Box<dyn Error>> {
+    let database_url = env::var("TICKERSIX_DATABASE_URL")
+        .map_err(|_| "TICKERSIX_DATABASE_URL must point to PostgreSQL")?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&database_url)
+        .await?;
+    db::run_migrations(&pool).await?;
+    let result = rating::apply_next(&pool, auth::unix_now()).await?;
+    println!("{}", serde_json::to_string_pretty(&result)?);
+    Ok(())
+}
+
 #[derive(Debug, Deserialize)]
 struct RecorderLineOwned {
     #[serde(default)]
@@ -138,13 +155,13 @@ struct RecorderLineOwned {
     batch: Option<PriceBatch>,
 }
 
-/// Reads recorder NDJSON and emits measurement-only summaries for the three
+/// Reads recorder NDJSON and emits measurement-only summaries for the
 /// candidate observation durations in the source specification.
-fn analyze_phase0() -> Result<(), Box<dyn Error>> {
+fn analyze_market_data() -> Result<(), Box<dyn Error>> {
     let input_path = env::args()
         .nth(2)
-        .or_else(|| env::var("TICKERSIX_PHASE0_INPUT").ok())
-        .ok_or("usage: cargo run -p backend -- phase0-analyze <ndjson>")?;
+        .or_else(|| env::var("TICKERSIX_MARKET_DATA_INPUT").ok())
+        .ok_or("usage: cargo run -p backend -- analyze-market-data <ndjson>")?;
     let file = File::open(&input_path)?;
     let reader = BufReader::new(file);
     let mut requested_mints = BTreeSet::new();
@@ -154,7 +171,7 @@ fn analyze_phase0() -> Result<(), Box<dyn Error>> {
         let line = line?;
         let record: RecorderLineOwned = serde_json::from_str(&line).map_err(|error| {
             format!(
-                "invalid Phase 0 NDJSON at line {}: {error}",
+                "invalid market-data NDJSON at line {}: {error}",
                 line_number + 1
             )
         })?;
@@ -163,10 +180,14 @@ fn analyze_phase0() -> Result<(), Box<dyn Error>> {
             continue;
         }
         let Some(batch) = record.batch else {
-            return Err(format!("successful Phase 0 row {} has no batch", line_number + 1).into());
+            return Err(format!(
+                "successful market-data row {} has no batch",
+                line_number + 1
+            )
+            .into());
         };
         for observation in batch.observations {
-            observations.push(Phase0Observation::new(
+            observations.push(MarketDataObservation::new(
                 record.attestor_id.clone(),
                 observation.mint,
                 observation.price_q9,
@@ -177,7 +198,7 @@ fn analyze_phase0() -> Result<(), Box<dyn Error>> {
     }
 
     if observations.is_empty() {
-        return Err("Phase 0 input contains no successful observations".into());
+        return Err("market-data input contains no successful observations".into());
     }
     if requested_mints.is_empty() {
         requested_mints.extend(
@@ -187,34 +208,34 @@ fn analyze_phase0() -> Result<(), Box<dyn Error>> {
         );
     }
     let requested_mints: Vec<String> = requested_mints.into_iter().collect();
-    let window_start = match env::var("TICKERSIX_PHASE0_WINDOW_START_UNIX_MS") {
+    let window_start = match env::var("TICKERSIX_OBSERVATION_WINDOW_START_UNIX_MS") {
         Ok(value) => value.parse::<i64>()?,
         Err(_) => observations
             .iter()
             .map(|observation| observation.observed_at_unix_ms)
             .min()
-            .ok_or("Phase 0 input contains no timestamps")?,
+            .ok_or("market-data input contains no timestamps")?,
     };
-    let windows = env::var("TICKERSIX_PHASE0_WINDOWS_SECS")
+    let windows = env::var("TICKERSIX_OBSERVATION_WINDOWS_SECS")
         .unwrap_or_else(|_| "3600,7200,14400".to_owned())
         .split(',')
         .map(|value| value.trim().parse::<u64>())
         .collect::<Result<Vec<_>, _>>()?;
     if windows.is_empty() || windows.contains(&0) {
-        return Err("TICKERSIX_PHASE0_WINDOWS_SECS must contain positive durations".into());
+        return Err("TICKERSIX_OBSERVATION_WINDOWS_SECS must contain positive durations".into());
     }
 
     let summaries = windows
         .into_iter()
         .map(|window_secs| {
-            summarize_phase0_window(&requested_mints, &observations, window_start, window_secs)
+            summarize_observation_window(&requested_mints, &observations, window_start, window_secs)
         })
         .collect::<Result<Vec<_>, _>>()?;
     println!("{}", serde_json::to_string_pretty(&summaries)?);
     Ok(())
 }
 
-async fn record_phase0() -> Result<(), Box<dyn Error>> {
+async fn record_market_data() -> Result<(), Box<dyn Error>> {
     let config = RecorderConfig::from_environment()?;
     let client = JupiterClient::with_base_url(&config.base_url, config.api_key.clone())?;
 
@@ -275,20 +296,22 @@ async fn record_phase0() -> Result<(), Box<dyn Error>> {
 
 impl RecorderConfig {
     fn from_environment() -> Result<Self, Box<dyn Error>> {
-        let mints = required_csv("TICKERSIX_PHASE0_MINTS")?;
-        let attestor_count =
-            parse_env_or("TICKERSIX_PHASE0_ATTESTOR_COUNT", DEFAULT_ATTESTOR_COUNT)?;
-        let attestor_index = parse_env_or("TICKERSIX_PHASE0_ATTESTOR_INDEX", 0usize)?;
+        let mints = required_csv("TICKERSIX_MARKET_DATA_MINTS")?;
+        let attestor_count = parse_env_or(
+            "TICKERSIX_MARKET_DATA_ATTESTOR_COUNT",
+            DEFAULT_ATTESTOR_COUNT,
+        )?;
+        let attestor_index = parse_env_or("TICKERSIX_MARKET_DATA_ATTESTOR_INDEX", 0usize)?;
         if attestor_index >= attestor_count {
             return Err(
-                "TICKERSIX_PHASE0_ATTESTOR_INDEX must be less than attestor count"
+                "TICKERSIX_MARKET_DATA_ATTESTOR_INDEX must be less than attestor count"
                     .to_owned()
                     .into(),
             );
         }
 
         let sample_interval_secs = parse_env_or(
-            "TICKERSIX_PHASE0_SAMPLE_INTERVAL_SECS",
+            "TICKERSIX_MARKET_DATA_SAMPLE_INTERVAL_SECS",
             DEFAULT_SAMPLE_INTERVAL_SECS,
         )?;
         let api_key = env::var("TICKERSIX_JUPITER_API_KEY").ok();
@@ -298,7 +321,7 @@ impl RecorderConfig {
             KEYLESS_PROVIDER_LIMIT_MILLI_RPS
         };
         let provider_limit_milli_rps = parse_env_or(
-            "TICKERSIX_PHASE0_PROVIDER_LIMIT_MILLI_RPS",
+            "TICKERSIX_MARKET_DATA_PROVIDER_LIMIT_MILLI_RPS",
             default_provider_limit,
         )?;
         validate_sampling_plan(
@@ -307,10 +330,10 @@ impl RecorderConfig {
             provider_limit_milli_rps,
         )?;
 
-        let attestor_id = env::var("TICKERSIX_PHASE0_ATTESTOR_ID")
+        let attestor_id = env::var("TICKERSIX_MARKET_DATA_ATTESTOR_ID")
             .unwrap_or_else(|_| format!("attestor-{attestor_index}"));
-        let output_path = env::var("TICKERSIX_PHASE0_OUTPUT")
-            .unwrap_or_else(|_| format!("phase0/{attestor_id}.ndjson"));
+        let output_path = env::var("TICKERSIX_MARKET_DATA_OUTPUT")
+            .unwrap_or_else(|_| format!("market-data/{attestor_id}.ndjson"));
 
         Ok(Self {
             api_key,
@@ -320,7 +343,7 @@ impl RecorderConfig {
             attestor_index,
             attestor_count,
             sample_interval_secs,
-            iterations: parse_env_or("TICKERSIX_PHASE0_ITERATIONS", DEFAULT_ITERATIONS)?,
+            iterations: parse_env_or("TICKERSIX_MARKET_DATA_ITERATIONS", DEFAULT_ITERATIONS)?,
             output_path,
             mints,
         })
@@ -366,18 +389,19 @@ fn now_unix_ms() -> Result<i64, Box<dyn Error>> {
 
 fn print_usage() {
     println!(
-        r#"Usage: cargo run -p backend -- phase0-record
-Metadata: cargo run -p backend -- phase0-metadata
+        r#"Usage: cargo run -p backend -- record-market-data
+Metadata: cargo run -p backend -- record-token-metadata
 
-Required: TICKERSIX_PHASE0_MINTS=mint_a,mint_b,...
-Optional: TICKERSIX_JUPITER_API_KEY, TICKERSIX_PHASE0_OUTPUT,
-TICKERSIX_PHASE0_ATTESTOR_ID, TICKERSIX_PHASE0_ATTESTOR_INDEX,
-TICKERSIX_PHASE0_ITERATIONS, TICKERSIX_PHASE0_SAMPLE_INTERVAL_SECS
+Required: TICKERSIX_MARKET_DATA_MINTS=mint_a,mint_b,...
+Optional: TICKERSIX_JUPITER_API_KEY, TICKERSIX_MARKET_DATA_OUTPUT,
+TICKERSIX_MARKET_DATA_ATTESTOR_ID, TICKERSIX_MARKET_DATA_ATTESTOR_INDEX,
+TICKERSIX_MARKET_DATA_ITERATIONS, TICKERSIX_MARKET_DATA_SAMPLE_INTERVAL_SECS
 
-Analysis: cargo run -p backend -- phase0-analyze phase0/attestor-0.ndjson
-Phase 2 attestor: TICKERSIX_ATTESTOR_CONFIG=attestor.json cargo run -p backend -- attestor-run
-Phase 3.1 API: TICKERSIX_DATABASE_URL=postgres://... cargo run -p backend -- api-serve
-Phase 3.2 matcher: TICKERSIX_DATABASE_URL=postgres://... cargo run -p backend -- ranked-match <market_round_id>
+Analysis: cargo run -p backend -- analyze-market-data market-data/attestor-0.ndjson
+Attestor worker: TICKERSIX_ATTESTOR_CONFIG=attestor.json cargo run -p backend -- attestor-run
+HTTP API: TICKERSIX_DATABASE_URL=postgres://... cargo run -p backend -- api-serve
+Ranked matcher: TICKERSIX_DATABASE_URL=postgres://... cargo run -p backend -- ranked-match <market_round_id>
+Rating worker: TICKERSIX_DATABASE_URL=postgres://... cargo run -p backend -- rating-apply
 Settlement planner: cargo run -p backend -- settlement-plan settlement.json
 Proof endpoint: cargo run -p backend -- proof-serve proof.json [bind]"#
     );
