@@ -81,6 +81,23 @@ pub struct LeagueMembershipAccounts {
     pub member: [u8; 32],
 }
 
+/// Accounts required by the coordinator to create one rated League Battle and
+/// both per-round RatedSlot accounts atomically.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LeagueRatedBattleAccounts {
+    pub config: [u8; 32],
+    pub coordinator: [u8; 32],
+    pub market_round: [u8; 32],
+    pub player_a: [u8; 32],
+    pub player_b: [u8; 32],
+    pub league: [u8; 32],
+    pub league_member_a: [u8; 32],
+    pub league_member_b: [u8; 32],
+    pub battle: [u8; 32],
+    pub rated_slot_a: [u8; 32],
+    pub rated_slot_b: [u8; 32],
+}
+
 /// The two instructions that must be adjacent in a relay transaction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PriceRelayPlan {
@@ -261,6 +278,47 @@ pub fn build_create_official_league_instruction(
             total_rounds,
             pairing_policy_version,
             registration_close_at,
+        }
+        .data(),
+    }
+}
+
+/// Builds the coordinator instruction for a League pairing. The optional
+/// League accounts used by the shared Anchor instruction are supplied in the
+/// exact order expected by `CreateRatedBattle` so the program can validate the
+/// League PDA, both LeagueMember PDAs, current round, and active membership.
+pub fn build_create_league_rated_battle_instruction(
+    battle_id: u64,
+    league_round_no: u16,
+    rating_a_before: i32,
+    rating_b_before: i32,
+    rating_formula_version: u16,
+    accounts: LeagueRatedBattleAccounts,
+) -> Instruction {
+    Instruction {
+        program_id: address(tickersix::ID.to_bytes()),
+        accounts: vec![
+            readonly(address(accounts.config)),
+            signer_writable(address(accounts.coordinator)),
+            writable(address(accounts.market_round)),
+            readonly(address(accounts.player_a)),
+            readonly(address(accounts.player_b)),
+            readonly(address(accounts.league)),
+            readonly(address(accounts.league_member_a)),
+            readonly(address(accounts.league_member_b)),
+            writable(address(accounts.battle)),
+            writable(address(accounts.rated_slot_a)),
+            writable(address(accounts.rated_slot_b)),
+            readonly(address(system_program::ID.to_bytes())),
+        ],
+        data: tickersix::instruction::CreateRatedBattle {
+            battle_id,
+            mode: tickersix::BattleMode::League,
+            league: AnchorPubkey::new_from_array(accounts.league),
+            league_round_no,
+            rating_a_before,
+            rating_b_before,
+            rating_formula_version,
         }
         .data(),
     }

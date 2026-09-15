@@ -164,7 +164,12 @@ impl IntoResponse for ApiError {
                 | LeagueError::NotMember
                 | LeagueError::ScheduleUnavailable
                 | LeagueError::ScheduleConflict
-                | LeagueError::InvalidMembershipState,
+                | LeagueError::InvalidMembershipState
+                | LeagueError::EntropyUnavailable
+                | LeagueError::PairingNotReady
+                | LeagueError::PairingConflict
+                | LeagueError::CoordinatorPlanUnavailable
+                | LeagueError::CoordinatorConflict,
             ) => StatusCode::CONFLICT,
             Self::League(
                 LeagueError::InvalidLeagueId
@@ -176,7 +181,9 @@ impl IntoResponse for ApiError {
                 | LeagueError::DuplicateMarketRound
                 | LeagueError::DuplicateLeagueRound
                 | LeagueError::ScheduleOverlap
-                | LeagueError::ChainIdentityUnavailable,
+                | LeagueError::ChainIdentityUnavailable
+                | LeagueError::InvalidEntropy
+                | LeagueError::InvalidPairing,
             ) => StatusCode::BAD_REQUEST,
             Self::Live(LiveError::NotFound) => StatusCode::NOT_FOUND,
             Self::Live(LiveError::InvalidBattle) => StatusCode::BAD_REQUEST,
@@ -578,6 +585,13 @@ fn error_code(error: &ApiError) -> &'static str {
         ApiError::League(LeagueError::ScheduleConflict) => "LEAGUE_SCHEDULE_CONFLICT",
         ApiError::League(LeagueError::ChainIdentityUnavailable) => "CHAIN_IDENTITY_UNAVAILABLE",
         ApiError::League(LeagueError::InvalidMembershipState) => "INVALID_MEMBERSHIP_STATE",
+        ApiError::League(LeagueError::EntropyUnavailable) => "PAIRING_ENTROPY_UNAVAILABLE",
+        ApiError::League(LeagueError::InvalidEntropy) => "INVALID_PAIRING_ENTROPY",
+        ApiError::League(LeagueError::PairingNotReady) => "PAIRING_NOT_READY",
+        ApiError::League(LeagueError::InvalidPairing) => "INVALID_PAIRING",
+        ApiError::League(LeagueError::PairingConflict) => "PAIRING_CONFLICT",
+        ApiError::League(LeagueError::CoordinatorPlanUnavailable) => "COORDINATOR_PLAN_UNAVAILABLE",
+        ApiError::League(LeagueError::CoordinatorConflict) => "COORDINATOR_CONFLICT",
         ApiError::Live(LiveError::InvalidBattle) => "INVALID_BATTLE",
         ApiError::Live(LiveError::NotFound) => "BATTLE_NOT_FOUND",
         ApiError::Live(LiveError::Storage(_)) => "INTERNAL_ERROR",

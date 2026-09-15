@@ -8,11 +8,16 @@
 //! instruction is returned, so Ranked admission and another League cannot
 //! claim the same wallet during an unresolved membership transition.
 
-use std::{collections::HashSet, fmt};
+use std::{
+    collections::{HashMap, HashSet},
+    fmt,
+};
 
+use protocol::{league_pairing_seed, league_standings_input_hash, pair_swiss, PairingPlayer};
 use relay::{
-    build_join_league_instruction, build_leave_league_instruction, config_pda, league_member_pda,
-    LeagueMembershipAccounts,
+    build_create_league_rated_battle_instruction, build_join_league_instruction,
+    build_leave_league_instruction, config_pda, create_rated_battle_pdas, league_member_pda,
+    LeagueMembershipAccounts, LeagueRatedBattleAccounts,
 };
 use serde::Serialize;
 use solana_instruction::Instruction;
@@ -41,6 +46,25 @@ pub struct ScheduleEntry {
     pub end_target_at: i64,
 }
 
+/// A finalized chain block eligible to provide deterministic pairing entropy.
+/// The chain reader supplies candidates; this module never chooses an
+/// operator-selected block or treats an unfinalized block as randomness.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FinalizedEntropyCandidate {
+    pub slot: i64,
+    pub block_time: i64,
+    pub blockhash: String,
+    pub finalized: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PairingEntropy {
+    pub slot: i64,
+    pub block_time: i64,
+    pub blockhash: String,
+    pub bytes: [u8; 32],
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LeagueError {
     InvalidLeagueId,
@@ -61,6 +85,13 @@ pub enum LeagueError {
     ScheduleConflict,
     ChainIdentityUnavailable,
     InvalidMembershipState,
+    EntropyUnavailable,
+    InvalidEntropy,
+    PairingNotReady,
+    InvalidPairing,
+    PairingConflict,
+    CoordinatorPlanUnavailable,
+    CoordinatorConflict,
     Storage(String),
 }
 
@@ -85,6 +116,13 @@ impl fmt::Display for LeagueError {
             Self::ScheduleConflict => "wallet has an overlapping rated obligation",
             Self::ChainIdentityUnavailable => "League chain identity is unavailable or invalid",
             Self::InvalidMembershipState => "membership state is not valid for this operation",
+            Self::EntropyUnavailable => "no finalized chain entropy is available for pairing",
+            Self::InvalidEntropy => "pairing entropy is invalid",
+            Self::PairingNotReady => "League pairing is not ready at the configured cutoff",
+            Self::InvalidPairing => "League pairing state is invalid",
+            Self::PairingConflict => "League pairing conflicts with existing state",
+            Self::CoordinatorPlanUnavailable => "League coordinator Battle plan is unavailable",
+            Self::CoordinatorConflict => "League coordinator Battle confirmation conflicts",
             Self::Storage(_) => "League storage operation failed",
         })
     }
@@ -162,6 +200,52 @@ pub struct LeaveLeagueResponse {
     pub instruction: InstructionView,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct LeaguePairingView {
+    pub pairing_id: i64,
+    pub league_round_no: i32,
+    pub market_round_id: i64,
+    pub player_a: String,
+    pub player_b: String,
+    pub pairing_seed_hex: String,
+    pub seed_source_slot: i64,
+    pub seed_source_blockhash: String,
+    pub repeat_relaxed: bool,
+    pub battle_pubkey: Option<String>,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct LeaguePairingRun {
+    pub league_id: i64,
+    pub league_round_no: i32,
+    pub market_round_id: i64,
+    pub pairing_policy_version: i32,
+    pub pairing_seed_hex: String,
+    pub standings_input_hash_hex: String,
+    pub seed_source_slot: i64,
+    pub seed_source_blockhash: String,
+    pub bye_wallet: Option<String>,
+    pub pairings: Vec<LeaguePairingView>,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct LeagueBattleAccounts {
+    pub config: [u8; 32],
+    pub coordinator: [u8; 32],
+}
+
+#[derive(Debug, Clone)]
+pub struct LeagueBattlePlan {
+    pub pairing_id: i64,
+    pub battle_id: u64,
+    pub market_round_id: i64,
+    pub league_round_no: i32,
+    pub player_a: String,
+    pub player_b: String,
+    pub instruction: Instruction,
+}
+
 /// Inputs for an official League projection created from the coordinator's
 /// on-chain League transaction. The chain public key is the stable identity;
 /// the database id is only an API and foreign-key convenience.
@@ -181,6 +265,9 @@ struct LeagueRow {
     chain_pubkey: String,
     max_players: i32,
     total_rounds: i32,
+    current_round: i32,
+    pairing_policy_version: i32,
+    rated: bool,
     registration_close_at: i64,
     status: String,
 }
@@ -224,11 +311,67 @@ pub fn validate_schedule(schedule: &[ScheduleEntry]) -> Result<(), LeagueError> 
     Ok(())
 }
 
+/// Chooses the lowest finalized slot whose block time reaches the pairing
+/// cutoff. Sorting by slot makes the result independent of RPC response order,
+/// while retaining the selected slot and blockhash for the audit record.
+pub fn select_pairing_entropy(
+    candidates: &[FinalizedEntropyCandidate],
+    pairing_cutoff_at: i64,
+) -> Result<PairingEntropy, LeagueError> {
+    let mut eligible = candidates
+        .iter()
+        .filter(|candidate| candidate.finalized && candidate.block_time >= pairing_cutoff_at)
+        .collect::<Vec<_>>();
+    eligible.sort_by_key(|candidate| (candidate.slot, candidate.blockhash.as_str()));
+    let candidate = eligible.first().ok_or(LeagueError::EntropyUnavailable)?;
+    if candidate.slot < 0 {
+        return Err(LeagueError::InvalidEntropy);
+    }
+    let bytes = parse_blockhash(&candidate.blockhash)?;
+    Ok(PairingEntropy {
+        slot: candidate.slot,
+        block_time: candidate.block_time,
+        blockhash: candidate.blockhash.clone(),
+        bytes,
+    })
+}
+
 /// Returns the canonical on-chain LeagueMember PDA for a wallet.
 pub fn expected_member_pubkey(league_pubkey: &str, wallet: &str) -> Result<String, LeagueError> {
     let league = parse_wallet(league_pubkey).map_err(|_| LeagueError::ChainIdentityUnavailable)?;
     let player = parse_wallet(wallet).map_err(|_| LeagueError::InvalidWallet)?;
     Ok(bs58::encode(league_member_pda(league, player)).into_string())
+}
+
+pub fn validate_league_chain_pubkey(league_pubkey: &str) -> Result<(), LeagueError> {
+    parse_chain_pubkey(league_pubkey).map(|_| ())
+}
+
+fn validate_pairing_entropy(entropy: &PairingEntropy) -> Result<(), LeagueError> {
+    if entropy.slot < 0
+        || entropy.block_time < 0
+        || parse_blockhash(&entropy.blockhash)? != entropy.bytes
+    {
+        return Err(LeagueError::InvalidEntropy);
+    }
+    Ok(())
+}
+
+fn parse_blockhash(value: &str) -> Result<[u8; 32], LeagueError> {
+    parse_wallet(value).map_err(|_| LeagueError::InvalidEntropy)
+}
+
+fn parse_player_pubkey(value: &str) -> Result<[u8; 32], LeagueError> {
+    parse_wallet(value).map_err(|_| LeagueError::InvalidWallet)
+}
+
+fn db_seed(row: &PgRow) -> Result<[u8; 32], LeagueError> {
+    db_bytes32(row, "pairing_seed")
+}
+
+fn db_bytes32(row: &PgRow, column: &str) -> Result<[u8; 32], LeagueError> {
+    let bytes: Vec<u8> = row.try_get(column).map_err(storage_error)?;
+    bytes.try_into().map_err(|_| LeagueError::InvalidPairing)
 }
 
 pub async fn list_leagues(
@@ -360,6 +503,46 @@ pub async fn upsert_official_league(
     existing.try_get("id").map_err(storage_error)
 }
 
+/// Reconciles the lifecycle fields written by the on-chain League account.
+/// Membership rows remain wallet-intent projections; the indexed account is
+/// still authoritative for whether registration or a round is active.
+pub async fn reconcile_league_state(
+    pool: &PgPool,
+    chain_pubkey: &str,
+    state: &str,
+    joined_players: i32,
+    current_round: i32,
+    indexed_at: i64,
+) -> Result<(), LeagueError> {
+    parse_chain_pubkey(chain_pubkey)?;
+    if !matches!(
+        state,
+        LEAGUE_REGISTRATION | LEAGUE_ACTIVE | LEAGUE_COMPLETED | LEAGUE_CANCELLED
+    ) || !(0..=MAX_LEAGUE_PLAYERS).contains(&joined_players)
+        || current_round < 0
+    {
+        return Err(LeagueError::InvalidLeague);
+    }
+    let result = sqlx::query(
+        "UPDATE leagues
+         SET status = $2, onchain_joined_players = $3,
+             current_round = $4, updated_at = $5
+         WHERE chain_pubkey = $1",
+    )
+    .bind(chain_pubkey)
+    .bind(state)
+    .bind(joined_players)
+    .bind(current_round)
+    .bind(indexed_at)
+    .execute(pool)
+    .await
+    .map_err(storage_error)?;
+    if result.rows_affected() != 1 {
+        return Err(LeagueError::NotFound);
+    }
+    Ok(())
+}
+
 /// Atomically assigns every future Market Round for an official League.
 ///
 /// A transaction-wide advisory lock serializes schedule writers across
@@ -445,6 +628,535 @@ pub async fn assign_schedule(
         .map_err(storage_error)?;
     transaction.commit().await.map_err(storage_error)?;
     list_rounds(pool, league_id).await
+}
+
+/// Computes and durably records one deterministic Swiss pairing run.
+///
+/// The caller supplies entropy selected from finalized chain blocks. The
+/// transaction locks the League pairing lane, snapshots current ratings and
+/// prior formal pairings, and writes the complete pair/participant set before
+/// any coordinator Battle exists. A retry returns the original immutable run.
+pub async fn create_league_pairings(
+    pool: &PgPool,
+    league_id: i64,
+    league_round_no: i32,
+    entropy: &PairingEntropy,
+    now: i64,
+) -> Result<LeaguePairingRun, LeagueError> {
+    validate_league_id(league_id)?;
+    if league_round_no <= 0 {
+        return Err(LeagueError::InvalidPairing);
+    }
+    validate_pairing_entropy(entropy)?;
+
+    let mut transaction = pool.begin().await.map_err(storage_error)?;
+    lock_scheduler(&mut transaction).await?;
+    let league = load_league_for_update(&mut transaction, league_id).await?;
+
+    let existing_run = sqlx::query(
+        "SELECT id
+         FROM league_pairing_runs
+         WHERE league_id = $1 AND league_round_no = $2
+         FOR UPDATE",
+    )
+    .bind(league_id)
+    .bind(league_round_no)
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(storage_error)?;
+    if let Some(row) = existing_run {
+        let run_id: i64 = row.try_get("id").map_err(storage_error)?;
+        transaction.commit().await.map_err(storage_error)?;
+        return load_pairing_run(pool, run_id).await;
+    }
+
+    if league.status != LEAGUE_ACTIVE
+        || !league.rated
+        || league.current_round != league_round_no
+        || league_round_no > league.total_rounds
+    {
+        return Err(LeagueError::PairingNotReady);
+    }
+    ensure_previous_league_round_resolved(&mut transaction, league_id, league_round_no).await?;
+    let market_round = load_pairing_market_round(&mut transaction, league_id, league_round_no)
+        .await?
+        .ok_or(LeagueError::PairingNotReady)?;
+    if market_round.chain_pubkey.is_none()
+        || market_round.is_replay
+        || !matches!(market_round.state.as_str(), "SCHEDULED" | "COMMIT_OPEN")
+        || now >= market_round.start_target_at
+        || now < market_round.queue_close_at
+        || entropy.block_time < market_round.queue_close_at
+        || entropy.block_time > now
+    {
+        return Err(LeagueError::PairingNotReady);
+    }
+    parse_chain_pubkey(
+        market_round
+            .chain_pubkey
+            .as_deref()
+            .ok_or(LeagueError::PairingNotReady)?,
+    )
+    .map_err(|_| LeagueError::InvalidPairing)?;
+    let league_pubkey = parse_chain_pubkey(&league.chain_pubkey)?;
+    let round_number = u16::try_from(league_round_no).map_err(|_| LeagueError::InvalidPairing)?;
+    let pairing_seed = league_pairing_seed(league_pubkey, round_number, entropy.bytes);
+
+    let candidates = load_pairing_candidates(&mut transaction, league_id, league_round_no).await?;
+    if candidates.len() < 2 {
+        return Err(LeagueError::InvalidPairing);
+    }
+    let protocol_players = candidates
+        .iter()
+        .map(|candidate| PairingPlayer {
+            wallet: candidate.wallet_bytes,
+            league_points: candidate.league_points,
+            rating: candidate.rating,
+            bye_count: candidate.bye_count,
+            prior_opponents: candidate.prior_opponents.clone(),
+        })
+        .collect::<Vec<_>>();
+    let standings_input_hash = league_standings_input_hash(&protocol_players);
+    let pairing =
+        pair_swiss(&protocol_players, pairing_seed).map_err(|_| LeagueError::InvalidPairing)?;
+    if pairing.pairs.is_empty() && pairing.bye.is_none() {
+        return Err(LeagueError::InvalidPairing);
+    }
+    let bye_wallet = pairing.bye.map(|index| candidates[index].wallet.as_str());
+    let run_id = sqlx::query(
+        "INSERT INTO league_pairing_runs
+            (league_id, league_round_no, market_round_id, pairing_seed,
+             pairing_policy_version, standings_input_hash,
+             seed_source_slot, seed_source_blockhash, bye_wallet, status, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, 'PLANNED', $10)
+         RETURNING id",
+    )
+    .bind(league_id)
+    .bind(league_round_no)
+    .bind(market_round.market_round_id)
+    .bind(pairing_seed.as_slice())
+    .bind(league.pairing_policy_version)
+    .bind(standings_input_hash.as_slice())
+    .bind(entropy.slot)
+    .bind(&entropy.blockhash)
+    .bind(bye_wallet)
+    .bind(now)
+    .fetch_one(&mut *transaction)
+    .await
+    .map_err(storage_error)?
+    .try_get::<i64, _>("id")
+    .map_err(storage_error)?;
+
+    if let Some(bye_wallet) = bye_wallet {
+        let result = sqlx::query(
+            "UPDATE league_memberships
+             SET bye_count = bye_count + 1, updated_at = $3
+             WHERE league_id = $1 AND wallet = $2
+               AND membership_state = 'ACTIVE' AND active = TRUE",
+        )
+        .bind(league_id)
+        .bind(bye_wallet)
+        .bind(now)
+        .execute(&mut *transaction)
+        .await
+        .map_err(storage_error)?;
+        if result.rows_affected() != 1 {
+            return Err(LeagueError::PairingConflict);
+        }
+    }
+
+    for (left, right) in pairing.pairs {
+        let player_a = &candidates[left];
+        let player_b = &candidates[right];
+        let repeat_relaxed = player_a.prior_opponents.contains(&player_b.wallet_bytes)
+            || player_b.prior_opponents.contains(&player_a.wallet_bytes);
+        let pairing_id = sqlx::query(
+            "INSERT INTO league_pairings
+                (run_id, league_id, league_round_no, market_round_id,
+                 player_a, player_b, rating_a_snapshot, rating_b_snapshot,
+                 pairing_seed, seed_source_slot, seed_source_blockhash,
+                 repeat_relaxed, status, created_at)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
+                     'PENDING_COORDINATOR', $13)
+             RETURNING id",
+        )
+        .bind(run_id)
+        .bind(league_id)
+        .bind(league_round_no)
+        .bind(market_round.market_round_id)
+        .bind(&player_a.wallet)
+        .bind(&player_b.wallet)
+        .bind(player_a.rating)
+        .bind(player_b.rating)
+        .bind(pairing_seed.as_slice())
+        .bind(entropy.slot)
+        .bind(&entropy.blockhash)
+        .bind(repeat_relaxed)
+        .bind(now)
+        .execute(&mut *transaction)
+        .await
+        .map_err(storage_error)?;
+        if pairing_id.rows_affected() != 1 {
+            return Err(LeagueError::PairingConflict);
+        }
+        sqlx::query(
+            "INSERT INTO league_pairing_participants
+                (run_id, league_id, league_round_no, wallet, side)
+             VALUES ($1, $2, $3, $4, 'A'), ($1, $2, $3, $5, 'B')",
+        )
+        .bind(run_id)
+        .bind(league_id)
+        .bind(league_round_no)
+        .bind(&player_a.wallet)
+        .bind(&player_b.wallet)
+        .execute(&mut *transaction)
+        .await
+        .map_err(storage_error)?;
+    }
+    transaction.commit().await.map_err(storage_error)?;
+    load_pairing_run(pool, run_id).await
+}
+
+/// Prevents the League scheduler from pairing a new round while the preceding
+/// round still has an uncreated Battle, an unresolved Battle result, or no
+/// persisted pairing run at all. A League round may be voided, but that void
+/// must still be represented by a terminal indexed result before advancement.
+async fn ensure_previous_league_round_resolved(
+    transaction: &mut Transaction<'_, Postgres>,
+    league_id: i64,
+    league_round_no: i32,
+) -> Result<(), LeagueError> {
+    if league_round_no <= 1 {
+        return Ok(());
+    }
+    let previous_round = league_round_no - 1;
+    let row = sqlx::query(
+        "SELECT EXISTS (
+             SELECT 1
+             FROM league_pairing_runs r
+             WHERE r.league_id = $1
+               AND r.league_round_no = $2
+               AND r.status IN ('IN_PROGRESS', 'COMPLETE')
+               AND NOT EXISTS (
+                   SELECT 1
+                   FROM league_pairings p
+                   LEFT JOIN battles b ON b.chain_pubkey = p.battle_pubkey
+                   WHERE p.run_id = r.id
+                     AND (
+                         p.status <> 'CREATED'
+                         OR p.battle_pubkey IS NULL
+                         OR b.chain_pubkey IS NULL
+                         OR b.state NOT IN ('FINALIZED', 'SETTLED', 'VOIDED')
+                         OR b.result IS NULL
+                     )
+               )
+         ) AS resolved",
+    )
+    .bind(league_id)
+    .bind(previous_round)
+    .fetch_one(&mut **transaction)
+    .await
+    .map_err(storage_error)?;
+    if !row.try_get("resolved").map_err(storage_error)? {
+        return Err(LeagueError::PairingNotReady);
+    }
+    Ok(())
+}
+
+/// Returns the coordinator transaction plan for one persisted League pairing.
+/// The LeagueMember accounts are read-only identity proofs; the coordinator
+/// creates the Battle and both RatedSlots atomically on chain.
+pub async fn league_coordinator_battle_plan(
+    pool: &PgPool,
+    pairing_id: i64,
+    accounts: LeagueBattleAccounts,
+) -> Result<LeagueBattlePlan, LeagueError> {
+    if pairing_id <= 0 {
+        return Err(LeagueError::InvalidPairing);
+    }
+    if accounts.config != config_pda() {
+        return Err(LeagueError::CoordinatorPlanUnavailable);
+    }
+    let row = sqlx::query(
+        "SELECT p.id, p.league_id, p.league_round_no, p.market_round_id,
+                p.player_a, p.player_b, p.rating_a_snapshot,
+                p.rating_b_snapshot, p.status, p.battle_pubkey,
+                l.chain_pubkey AS league_pubkey, l.status AS league_status,
+                l.rated, l.current_round, mr.chain_pubkey AS market_round_pubkey,
+                mr.state AS market_round_state, mr.is_replay,
+                ma.onchain_member_pubkey AS member_a,
+                mb.onchain_member_pubkey AS member_b
+         FROM league_pairings p
+         JOIN leagues l ON l.id = p.league_id
+         JOIN market_rounds mr ON mr.id = p.market_round_id
+         JOIN league_memberships ma
+           ON ma.league_id = p.league_id AND ma.wallet = p.player_a
+          AND ma.membership_state = 'ACTIVE' AND ma.active = TRUE
+         JOIN league_memberships mb
+           ON mb.league_id = p.league_id AND mb.wallet = p.player_b
+          AND mb.membership_state = 'ACTIVE' AND mb.active = TRUE
+         WHERE p.id = $1",
+    )
+    .bind(pairing_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(storage_error)?
+    .ok_or(LeagueError::CoordinatorPlanUnavailable)?;
+    let status: String = row.try_get("status").map_err(storage_error)?;
+    if status != "PENDING_COORDINATOR" {
+        return Err(LeagueError::CoordinatorPlanUnavailable);
+    }
+    let league_status: String = row.try_get("league_status").map_err(storage_error)?;
+    let rated: bool = row.try_get("rated").map_err(storage_error)?;
+    let league_round_no: i32 = row.try_get("league_round_no").map_err(storage_error)?;
+    let current_round: i32 = row.try_get("current_round").map_err(storage_error)?;
+    let market_round_state: String = row.try_get("market_round_state").map_err(storage_error)?;
+    let is_replay: bool = row.try_get("is_replay").map_err(storage_error)?;
+    if league_status != LEAGUE_ACTIVE
+        || !rated
+        || league_round_no != current_round
+        || is_replay
+        || !matches!(market_round_state.as_str(), "SCHEDULED" | "COMMIT_OPEN")
+    {
+        return Err(LeagueError::CoordinatorPlanUnavailable);
+    }
+    let league_pubkey: [u8; 32] = parse_chain_pubkey(
+        &row.try_get::<String, _>("league_pubkey")
+            .map_err(storage_error)?,
+    )?;
+    let market_round: [u8; 32] = parse_chain_pubkey(
+        &row.try_get::<Option<String>, _>("market_round_pubkey")
+            .map_err(storage_error)?
+            .ok_or(LeagueError::CoordinatorPlanUnavailable)?,
+    )?;
+    let player_a: String = row.try_get("player_a").map_err(storage_error)?;
+    let player_b: String = row.try_get("player_b").map_err(storage_error)?;
+    let player_a_bytes = parse_player_pubkey(&player_a)?;
+    let player_b_bytes = parse_player_pubkey(&player_b)?;
+    let expected_member_a_bytes = league_member_pda(league_pubkey, player_a_bytes);
+    let expected_member_b_bytes = league_member_pda(league_pubkey, player_b_bytes);
+    let expected_member_a = bs58::encode(expected_member_a_bytes).into_string();
+    let expected_member_b = bs58::encode(expected_member_b_bytes).into_string();
+    let stored_member_a: Option<String> = row.try_get("member_a").map_err(storage_error)?;
+    let stored_member_b: Option<String> = row.try_get("member_b").map_err(storage_error)?;
+    if stored_member_a.as_deref() != Some(expected_member_a.as_str())
+        || stored_member_b.as_deref() != Some(expected_member_b.as_str())
+    {
+        return Err(LeagueError::CoordinatorPlanUnavailable);
+    }
+    let battle_id = u64::try_from(pairing_id).map_err(|_| LeagueError::InvalidPairing)?;
+    let (battle, rated_slot_a, rated_slot_b) =
+        create_rated_battle_pdas(market_round, battle_id, player_a_bytes, player_b_bytes);
+    let instruction = build_create_league_rated_battle_instruction(
+        battle_id,
+        u16::try_from(league_round_no).map_err(|_| LeagueError::InvalidPairing)?,
+        row.try_get("rating_a_snapshot").map_err(storage_error)?,
+        row.try_get("rating_b_snapshot").map_err(storage_error)?,
+        crate::rating::RATING_FORMULA_VERSION,
+        LeagueRatedBattleAccounts {
+            config: accounts.config,
+            coordinator: accounts.coordinator,
+            market_round,
+            player_a: player_a_bytes,
+            player_b: player_b_bytes,
+            league: league_pubkey,
+            league_member_a: expected_member_a_bytes,
+            league_member_b: expected_member_b_bytes,
+            battle,
+            rated_slot_a,
+            rated_slot_b,
+        },
+    );
+    Ok(LeagueBattlePlan {
+        pairing_id,
+        battle_id,
+        market_round_id: row.try_get("market_round_id").map_err(storage_error)?,
+        league_round_no,
+        player_a,
+        player_b,
+        instruction,
+    })
+}
+
+/// Materializes one confirmed League Battle and both rated exposures in one
+/// idempotent transaction after the coordinator transaction is finalized.
+pub async fn confirm_league_coordinator_battle(
+    pool: &PgPool,
+    pairing_id: i64,
+    battle_pubkey: &str,
+    now: i64,
+) -> Result<(), LeagueError> {
+    if pairing_id <= 0 {
+        return Err(LeagueError::InvalidPairing);
+    }
+    let battle_bytes =
+        parse_player_pubkey(battle_pubkey).map_err(|_| LeagueError::CoordinatorConflict)?;
+    let mut transaction = pool.begin().await.map_err(storage_error)?;
+    lock_scheduler(&mut transaction).await?;
+    let row = sqlx::query(
+        "SELECT p.id, p.league_id, p.league_round_no, p.market_round_id,
+                p.player_a, p.player_b, p.rating_a_snapshot,
+                p.rating_b_snapshot, p.status, p.battle_pubkey,
+                l.chain_pubkey AS league_pubkey,
+                mr.chain_pubkey AS market_round_pubkey
+         FROM league_pairings p
+         JOIN leagues l ON l.id = p.league_id
+         JOIN market_rounds mr ON mr.id = p.market_round_id
+         WHERE p.id = $1
+         FOR UPDATE",
+    )
+    .bind(pairing_id)
+    .fetch_optional(&mut *transaction)
+    .await
+    .map_err(storage_error)?
+    .ok_or(LeagueError::CoordinatorPlanUnavailable)?;
+    let status: String = row.try_get("status").map_err(storage_error)?;
+    let stored_battle: Option<String> = row.try_get("battle_pubkey").map_err(storage_error)?;
+    if status == "CREATED" {
+        if stored_battle.as_deref() == Some(battle_pubkey) {
+            transaction.commit().await.map_err(storage_error)?;
+            return Ok(());
+        }
+        return Err(LeagueError::CoordinatorConflict);
+    }
+    if status != "PENDING_COORDINATOR" || stored_battle.is_some() {
+        return Err(LeagueError::CoordinatorConflict);
+    }
+    let market_round_id: i64 = row.try_get("market_round_id").map_err(storage_error)?;
+    let league_id: i64 = row.try_get("league_id").map_err(storage_error)?;
+    let league_round_no: i32 = row.try_get("league_round_no").map_err(storage_error)?;
+    let player_a: String = row.try_get("player_a").map_err(storage_error)?;
+    let player_b: String = row.try_get("player_b").map_err(storage_error)?;
+    let market_round = parse_chain_pubkey(
+        &row.try_get::<Option<String>, _>("market_round_pubkey")
+            .map_err(storage_error)?
+            .ok_or(LeagueError::CoordinatorPlanUnavailable)?,
+    )?;
+    let _league = parse_chain_pubkey(
+        &row.try_get::<String, _>("league_pubkey")
+            .map_err(storage_error)?,
+    )?;
+    let player_a_bytes = parse_player_pubkey(&player_a)?;
+    let player_b_bytes = parse_player_pubkey(&player_b)?;
+    let battle_id = u64::try_from(pairing_id).map_err(|_| LeagueError::InvalidPairing)?;
+    let (expected_battle, _, _) =
+        create_rated_battle_pdas(market_round, battle_id, player_a_bytes, player_b_bytes);
+    if battle_bytes != expected_battle {
+        return Err(LeagueError::CoordinatorConflict);
+    }
+    let battle_insert = sqlx::query(
+        "INSERT INTO battles
+            (chain_pubkey, market_round_id, mode, rated, league_id,
+             league_round_no, player_a, player_b, state, indexed_at,
+             rating_a_before, rating_b_before, rating_formula_version)
+         VALUES ($1, $2, 'LEAGUE', TRUE, $3, $4, $5, $6, 'CREATED', $7,
+                 $8, $9, $10)
+         ON CONFLICT (chain_pubkey) DO UPDATE SET
+             league_id = EXCLUDED.league_id,
+             league_round_no = EXCLUDED.league_round_no,
+             rating_a_before = COALESCE(battles.rating_a_before, EXCLUDED.rating_a_before),
+             rating_b_before = COALESCE(battles.rating_b_before, EXCLUDED.rating_b_before),
+             rating_formula_version = COALESCE(
+                 battles.rating_formula_version, EXCLUDED.rating_formula_version
+             )
+         WHERE battles.market_round_id = EXCLUDED.market_round_id
+           AND battles.player_a = EXCLUDED.player_a
+           AND battles.player_b = EXCLUDED.player_b
+           AND battles.rated
+           AND battles.mode = 'LEAGUE'",
+    )
+    .bind(battle_pubkey)
+    .bind(market_round_id)
+    .bind(league_id)
+    .bind(league_round_no)
+    .bind(&player_a)
+    .bind(&player_b)
+    .bind(now)
+    .bind(
+        row.try_get::<i32, _>("rating_a_snapshot")
+            .map_err(storage_error)?,
+    )
+    .bind(
+        row.try_get::<i32, _>("rating_b_snapshot")
+            .map_err(storage_error)?,
+    )
+    .bind(i32::from(crate::rating::RATING_FORMULA_VERSION))
+    .execute(&mut *transaction)
+    .await
+    .map_err(storage_error)?;
+    if battle_insert.rows_affected() != 1 {
+        return Err(LeagueError::CoordinatorConflict);
+    }
+    for wallet in [&player_a, &player_b] {
+        let result = sqlx::query(
+            "INSERT INTO rated_exposures (market_round_id, wallet, battle_pubkey)
+             VALUES ($1, $2, $3)
+             ON CONFLICT (market_round_id, wallet) DO NOTHING",
+        )
+        .bind(market_round_id)
+        .bind(wallet)
+        .bind(battle_pubkey)
+        .execute(&mut *transaction)
+        .await
+        .map_err(storage_error)?;
+        if result.rows_affected() != 1 {
+            return Err(LeagueError::CoordinatorConflict);
+        }
+    }
+    let pairing_update = sqlx::query(
+        "UPDATE league_pairings
+         SET battle_pubkey = $1, status = 'CREATED'
+         WHERE id = $2 AND status = 'PENDING_COORDINATOR'",
+    )
+    .bind(battle_pubkey)
+    .bind(pairing_id)
+    .execute(&mut *transaction)
+    .await
+    .map_err(storage_error)?;
+    if pairing_update.rows_affected() != 1 {
+        return Err(LeagueError::CoordinatorConflict);
+    }
+
+    let participant_update = sqlx::query(
+        "UPDATE league_pairing_participants
+         SET battle_pubkey = $1
+         WHERE run_id = (SELECT run_id FROM league_pairings WHERE id = $2)
+           AND league_id = $3 AND league_round_no = $4
+           AND wallet IN ($5, $6)",
+    )
+    .bind(battle_pubkey)
+    .bind(pairing_id)
+    .bind(league_id)
+    .bind(league_round_no)
+    .bind(&player_a)
+    .bind(&player_b)
+    .execute(&mut *transaction)
+    .await
+    .map_err(storage_error)?;
+    if participant_update.rows_affected() != 2 {
+        return Err(LeagueError::CoordinatorConflict);
+    }
+
+    let run_update = sqlx::query(
+        "UPDATE league_pairing_runs run
+         SET status = CASE
+             WHEN NOT EXISTS (
+                 SELECT 1 FROM league_pairings p
+                 WHERE p.run_id = run.id AND p.status = 'PENDING_COORDINATOR'
+             ) THEN 'COMPLETE'
+             ELSE 'IN_PROGRESS'
+         END
+         WHERE run.id = (SELECT run_id FROM league_pairings WHERE id = $1)",
+    )
+    .bind(pairing_id)
+    .execute(&mut *transaction)
+    .await
+    .map_err(storage_error)?;
+    if run_update.rows_affected() != 1 {
+        return Err(LeagueError::CoordinatorConflict);
+    }
+    transaction.commit().await.map_err(storage_error)?;
+    Ok(())
 }
 
 /// Creates a pending join intent and returns a wallet-signed Anchor
@@ -879,8 +1591,8 @@ async fn load_league_for_update(
     league_id: i64,
 ) -> Result<LeagueRow, LeagueError> {
     sqlx::query(
-        "SELECT chain_pubkey, max_players, total_rounds,
-                registration_close_at, status
+        "SELECT chain_pubkey, max_players, total_rounds, current_round,
+                pairing_policy_version, rated, registration_close_at, status
          FROM leagues
          WHERE id = $1
          FOR UPDATE",
@@ -895,6 +1607,11 @@ async fn load_league_for_update(
             chain_pubkey: row.try_get("chain_pubkey").map_err(storage_error)?,
             max_players: row.try_get("max_players").map_err(storage_error)?,
             total_rounds: row.try_get("total_rounds").map_err(storage_error)?,
+            current_round: row.try_get("current_round").map_err(storage_error)?,
+            pairing_policy_version: row
+                .try_get("pairing_policy_version")
+                .map_err(storage_error)?,
+            rated: row.try_get("rated").map_err(storage_error)?,
             registration_close_at: row
                 .try_get("registration_close_at")
                 .map_err(storage_error)?,
@@ -929,6 +1646,257 @@ async fn load_schedule_in_tx(
             })
         })
         .collect()
+}
+
+async fn load_pairing_market_round(
+    transaction: &mut Transaction<'_, Postgres>,
+    league_id: i64,
+    league_round_no: i32,
+) -> Result<Option<PairingMarketRound>, LeagueError> {
+    sqlx::query(
+        "SELECT s.market_round_id, mr.chain_pubkey, mr.state, mr.is_replay,
+                mr.queue_close_at, mr.start_target_at
+         FROM league_round_schedule s
+         JOIN market_rounds mr ON mr.id = s.market_round_id
+         WHERE s.league_id = $1 AND s.league_round_no = $2
+         FOR UPDATE OF mr",
+    )
+    .bind(league_id)
+    .bind(league_round_no)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map(|row| {
+        row.map(|row| {
+            Ok(PairingMarketRound {
+                market_round_id: row.try_get("market_round_id").map_err(storage_error)?,
+                chain_pubkey: row.try_get("chain_pubkey").map_err(storage_error)?,
+                state: row.try_get("state").map_err(storage_error)?,
+                is_replay: row.try_get("is_replay").map_err(storage_error)?,
+                queue_close_at: row.try_get("queue_close_at").map_err(storage_error)?,
+                start_target_at: row.try_get("start_target_at").map_err(storage_error)?,
+            })
+        })
+    })
+    .map_err(storage_error)?
+    .transpose()
+}
+
+#[derive(Debug, Clone)]
+struct PairingMarketRound {
+    market_round_id: i64,
+    chain_pubkey: Option<String>,
+    state: String,
+    is_replay: bool,
+    queue_close_at: i64,
+    start_target_at: i64,
+}
+
+#[derive(Debug, Clone)]
+struct PairingCandidate {
+    wallet: String,
+    wallet_bytes: [u8; 32],
+    league_points: u32,
+    rating: i32,
+    bye_count: u16,
+    prior_opponents: Vec<[u8; 32]>,
+}
+
+async fn load_pairing_candidates(
+    transaction: &mut Transaction<'_, Postgres>,
+    league_id: i64,
+    league_round_no: i32,
+) -> Result<Vec<PairingCandidate>, LeagueError> {
+    let mut points = HashMap::<String, u32>::new();
+    let score_rows = sqlx::query(
+        "SELECT p.player_a, p.player_b, b.result
+         FROM league_pairings p
+         JOIN battles b ON b.chain_pubkey = p.battle_pubkey
+         WHERE p.league_id = $1 AND p.league_round_no < $2
+           AND b.state IN ('FINALIZED', 'SETTLED', 'VOIDED')
+           AND b.result IS NOT NULL",
+    )
+    .bind(league_id)
+    .bind(league_round_no)
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(storage_error)?;
+    for row in score_rows {
+        let player_a: String = row.try_get("player_a").map_err(storage_error)?;
+        let player_b: String = row.try_get("player_b").map_err(storage_error)?;
+        let result: String = row.try_get("result").map_err(storage_error)?;
+        let (points_a, points_b) =
+            league_result_points(&result).ok_or(LeagueError::InvalidPairing)?;
+        let current_a = points.get(&player_a).copied().unwrap_or_default();
+        let current_b = points.get(&player_b).copied().unwrap_or_default();
+        let next_a = current_a
+            .checked_add(points_a)
+            .ok_or(LeagueError::InvalidPairing)?;
+        let next_b = current_b
+            .checked_add(points_b)
+            .ok_or(LeagueError::InvalidPairing)?;
+        points.insert(player_a, next_a);
+        points.insert(player_b, next_b);
+    }
+
+    let bye_rows = sqlx::query(
+        "SELECT bye_wallet
+         FROM league_pairing_runs
+         WHERE league_id = $1 AND league_round_no < $2
+           AND bye_wallet IS NOT NULL",
+    )
+    .bind(league_id)
+    .bind(league_round_no)
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(storage_error)?;
+    for row in bye_rows {
+        let wallet: String = row.try_get("bye_wallet").map_err(storage_error)?;
+        let current = points.get(&wallet).copied().unwrap_or_default();
+        points.insert(
+            wallet,
+            current.checked_add(3).ok_or(LeagueError::InvalidPairing)?,
+        );
+    }
+
+    let mut prior_opponents = HashMap::<String, Vec<[u8; 32]>>::new();
+    let prior_rows = sqlx::query(
+        "SELECT player_a, player_b
+         FROM league_pairings
+         WHERE league_id = $1 AND league_round_no < $2",
+    )
+    .bind(league_id)
+    .bind(league_round_no)
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(storage_error)?;
+    for row in prior_rows {
+        let player_a: String = row.try_get("player_a").map_err(storage_error)?;
+        let player_b: String = row.try_get("player_b").map_err(storage_error)?;
+        let player_a_bytes = parse_player_pubkey(&player_a)?;
+        let player_b_bytes = parse_player_pubkey(&player_b)?;
+        prior_opponents
+            .entry(player_a)
+            .or_default()
+            .push(player_b_bytes);
+        prior_opponents
+            .entry(player_b)
+            .or_default()
+            .push(player_a_bytes);
+    }
+
+    let member_rows = sqlx::query(
+        "SELECT m.wallet, m.bye_count,
+                COALESCE(r.rating, 1500)::INTEGER AS rating
+         FROM league_memberships m
+         LEFT JOIN ratings r
+           ON r.wallet = m.wallet
+          AND r.season_id = (SELECT id FROM seasons WHERE status = 'ACTIVE')
+         WHERE m.league_id = $1
+           AND m.membership_state = 'ACTIVE'
+           AND m.active = TRUE
+         ORDER BY m.wallet ASC",
+    )
+    .bind(league_id)
+    .fetch_all(&mut **transaction)
+    .await
+    .map_err(storage_error)?;
+    member_rows
+        .into_iter()
+        .map(|row| {
+            let wallet: String = row.try_get("wallet").map_err(storage_error)?;
+            let bye_count: i32 = row.try_get("bye_count").map_err(storage_error)?;
+            let bye_count = u16::try_from(bye_count).map_err(|_| LeagueError::InvalidPairing)?;
+            Ok(PairingCandidate {
+                wallet_bytes: parse_player_pubkey(&wallet)?,
+                league_points: points.get(&wallet).copied().unwrap_or_default(),
+                rating: row.try_get("rating").map_err(storage_error)?,
+                bye_count,
+                prior_opponents: prior_opponents.remove(&wallet).unwrap_or_default(),
+                wallet,
+            })
+        })
+        .collect()
+}
+
+fn league_result_points(result: &str) -> Option<(u32, u32)> {
+    match result {
+        "PLAYER_A" => Some((3, 0)),
+        "PLAYER_B" => Some((0, 3)),
+        "DRAW" => Some((1, 1)),
+        "FORFEIT_A" => Some((0, 3)),
+        "FORFEIT_B" => Some((3, 0)),
+        "BOTH_FORFEIT" | "VOIDED" => Some((0, 0)),
+        _ => None,
+    }
+}
+
+async fn load_pairing_run(pool: &PgPool, run_id: i64) -> Result<LeaguePairingRun, LeagueError> {
+    let run = sqlx::query(
+        "SELECT league_id, league_round_no, market_round_id,
+                pairing_policy_version, pairing_seed, standings_input_hash,
+                seed_source_slot, seed_source_blockhash, bye_wallet
+         FROM league_pairing_runs
+         WHERE id = $1",
+    )
+    .bind(run_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(storage_error)?
+    .ok_or(LeagueError::NotFound)?;
+    let seed = db_seed(&run)?;
+    let standings_input_hash = db_bytes32(&run, "standings_input_hash")?;
+    let rows = sqlx::query(
+        "SELECT id, league_round_no, market_round_id, player_a, player_b,
+                pairing_seed, seed_source_slot, seed_source_blockhash,
+                repeat_relaxed, battle_pubkey, status
+         FROM league_pairings
+         WHERE run_id = $1
+         ORDER BY id ASC",
+    )
+    .bind(run_id)
+    .fetch_all(pool)
+    .await
+    .map_err(storage_error)?;
+    let pairings = rows
+        .iter()
+        .map(|row| {
+            let row_seed = db_seed(row)?;
+            if row_seed != seed {
+                return Err(LeagueError::InvalidPairing);
+            }
+            Ok(LeaguePairingView {
+                pairing_id: row.try_get("id").map_err(storage_error)?,
+                league_round_no: row.try_get("league_round_no").map_err(storage_error)?,
+                market_round_id: row.try_get("market_round_id").map_err(storage_error)?,
+                player_a: row.try_get("player_a").map_err(storage_error)?,
+                player_b: row.try_get("player_b").map_err(storage_error)?,
+                pairing_seed_hex: hex::encode(row_seed),
+                seed_source_slot: row.try_get("seed_source_slot").map_err(storage_error)?,
+                seed_source_blockhash: row
+                    .try_get("seed_source_blockhash")
+                    .map_err(storage_error)?,
+                repeat_relaxed: row.try_get("repeat_relaxed").map_err(storage_error)?,
+                battle_pubkey: row.try_get("battle_pubkey").map_err(storage_error)?,
+                status: row.try_get("status").map_err(storage_error)?,
+            })
+        })
+        .collect::<Result<Vec<_>, LeagueError>>()?;
+    Ok(LeaguePairingRun {
+        league_id: run.try_get("league_id").map_err(storage_error)?,
+        league_round_no: run.try_get("league_round_no").map_err(storage_error)?,
+        market_round_id: run.try_get("market_round_id").map_err(storage_error)?,
+        pairing_policy_version: run
+            .try_get("pairing_policy_version")
+            .map_err(storage_error)?,
+        pairing_seed_hex: hex::encode(seed),
+        standings_input_hash_hex: hex::encode(standings_input_hash),
+        seed_source_slot: run.try_get("seed_source_slot").map_err(storage_error)?,
+        seed_source_blockhash: run
+            .try_get("seed_source_blockhash")
+            .map_err(storage_error)?,
+        bye_wallet: run.try_get("bye_wallet").map_err(storage_error)?,
+        pairings,
+    })
 }
 
 async fn load_market_round_for_update(
@@ -1318,5 +2286,33 @@ mod tests {
 
         assert_eq!(first, second);
         assert_ne!(first, league);
+    }
+
+    #[test]
+    fn entropy_selection_chooses_the_first_finalized_slot_at_or_after_cutoff() {
+        let candidates = vec![
+            FinalizedEntropyCandidate {
+                slot: 12,
+                block_time: 1_000,
+                blockhash: bs58::encode([12; 32]).into_string(),
+                finalized: true,
+            },
+            FinalizedEntropyCandidate {
+                slot: 10,
+                block_time: 999,
+                blockhash: bs58::encode([10; 32]).into_string(),
+                finalized: true,
+            },
+            FinalizedEntropyCandidate {
+                slot: 11,
+                block_time: 1_000,
+                blockhash: bs58::encode([11; 32]).into_string(),
+                finalized: false,
+            },
+        ];
+
+        let selected = select_pairing_entropy(&candidates, 1_000).unwrap();
+        assert_eq!(selected.slot, 12);
+        assert_eq!(selected.blockhash, bs58::encode([12; 32]).into_string());
     }
 }

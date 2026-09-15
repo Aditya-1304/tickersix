@@ -435,6 +435,51 @@ pub struct PairingResult {
     pub bye: Option<usize>,
 }
 
+/// Derives the versioned League pairing seed from the canonical League
+/// identity, round number, and finalized chain entropy. The byte order is
+/// protocol-facing: the round number is encoded as an unsigned little-endian
+/// integer, matching the on-chain League PDA conventions.
+pub fn league_pairing_seed(
+    league_pubkey: [u8; 32],
+    league_round_no: u16,
+    deterministic_chain_entropy: [u8; 32],
+) -> [u8; 32] {
+    let mut bytes = Vec::with_capacity(32 + 2 + 32 + 21);
+    bytes.extend_from_slice(b"TICKERSIX_PAIRING_V1");
+    bytes.extend_from_slice(&league_pubkey);
+    bytes.extend_from_slice(&league_round_no.to_le_bytes());
+    bytes.extend_from_slice(&deterministic_chain_entropy);
+    Sha256::digest(bytes).into()
+}
+
+/// Hashes the canonical standings snapshot consumed by the League pairing
+/// engine. Ratings intentionally do not participate: League standings are
+/// based on League Points, formal prior opponents, and bye history. Sorting
+/// both players and opponent lists makes the audit value independent of SQL
+/// response order or the order in which prior pairings were loaded.
+pub fn league_standings_input_hash(players: &[PairingPlayer]) -> [u8; 32] {
+    let mut ordered_players = players.iter().collect::<Vec<_>>();
+    ordered_players.sort_unstable_by_key(|player| player.wallet);
+
+    let mut bytes = Vec::new();
+    bytes.extend_from_slice(b"TICKERSIX_STANDINGS_INPUT_V1\0");
+    for player in ordered_players {
+        bytes.extend_from_slice(&player.wallet);
+        bytes.extend_from_slice(&player.league_points.to_le_bytes());
+        bytes.extend_from_slice(&player.bye_count.to_le_bytes());
+
+        let mut opponents = player.prior_opponents.clone();
+        opponents.sort_unstable();
+        let opponent_count = u64::try_from(opponents.len())
+            .expect("a League standings snapshot cannot exceed usize-to-u64 bounds");
+        bytes.extend_from_slice(&opponent_count.to_le_bytes());
+        for opponent in opponents {
+            bytes.extend_from_slice(&opponent);
+        }
+    }
+    Sha256::digest(bytes).into()
+}
+
 /// Inputs for the V2 Ranked nearest-rating matcher.
 ///
 /// Ranked pairing has no League score or bye. The backend removes players

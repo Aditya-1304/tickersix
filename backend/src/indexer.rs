@@ -13,6 +13,7 @@ use crate::league;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IndexerError {
     InvalidRound,
+    InvalidLeague,
     InvalidLeagueMember,
     LeagueMembershipConflict,
     ExposureConflict,
@@ -23,6 +24,7 @@ impl fmt::Display for IndexerError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::InvalidRound => "indexed Market Round has invalid timing",
+            Self::InvalidLeague => "indexed League has invalid lifecycle fields",
             Self::InvalidLeagueMember => {
                 "indexed LeagueMember does not match the canonical League and wallet"
             }
@@ -47,6 +49,48 @@ pub struct IndexedMarketRound {
     pub start_target_at: i64,
     pub end_target_at: i64,
     pub indexed_at: i64,
+}
+
+/// Decoded lifecycle fields from an on-chain official League account.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexedLeague {
+    pub chain_pubkey: String,
+    pub state: String,
+    pub joined_players: i32,
+    pub current_round: i32,
+    pub indexed_at: i64,
+}
+
+pub fn validate_league(league: &IndexedLeague) -> Result<(), IndexerError> {
+    league::validate_league_chain_pubkey(&league.chain_pubkey)
+        .map_err(|_| IndexerError::InvalidLeague)?;
+    if !matches!(
+        league.state.as_str(),
+        "REGISTRATION" | "ACTIVE" | "COMPLETED" | "CANCELLED"
+    ) || !(0..=league::MAX_LEAGUE_PLAYERS).contains(&league.joined_players)
+        || league.current_round < 0
+    {
+        return Err(IndexerError::InvalidLeague);
+    }
+    Ok(())
+}
+
+pub async fn upsert_league(pool: &PgPool, league: &IndexedLeague) -> Result<(), IndexerError> {
+    validate_league(league)?;
+    crate::league::reconcile_league_state(
+        pool,
+        &league.chain_pubkey,
+        &league.state,
+        league.joined_players,
+        league.current_round,
+        league.indexed_at,
+    )
+    .await
+    .map_err(|error| match error {
+        crate::league::LeagueError::Storage(message) => IndexerError::Storage(message),
+        crate::league::LeagueError::NotFound => IndexerError::InvalidLeague,
+        _ => IndexerError::InvalidLeague,
+    })
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

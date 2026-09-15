@@ -1,5 +1,6 @@
 use protocol::{
-    apply_elo_update, pair_ranked, pair_swiss, EloOutcome, PairingPlayer, RankedPlayer,
+    apply_elo_update, league_pairing_seed, league_standings_input_hash, pair_ranked, pair_swiss,
+    EloOutcome, PairingPlayer, RankedPlayer,
 };
 
 fn player(id: u8, league_points: u32, rating: i32, byes: u16, opponents: &[u8]) -> PairingPlayer {
@@ -138,4 +139,29 @@ fn ranked_pairing_is_deterministic_and_leaves_odd_player_unmatched() {
     assert_eq!(first, second);
     assert_eq!(first.pairs, vec![(2, 1)]);
     assert_eq!(first.unmatched, Some(0));
+}
+
+#[test]
+fn league_pairing_seed_binds_domain_league_round_and_chain_entropy() {
+    let seed = league_pairing_seed([1; 32], 7, [2; 32]);
+
+    assert_eq!(
+        hex::encode(seed),
+        "9a516936c220652c5d1ebc63f8ae276fda7fa4173b771777dc29ce1f8cdb1cc4"
+    );
+    assert_ne!(seed, league_pairing_seed([1; 32], 8, [2; 32]));
+    assert_ne!(seed, league_pairing_seed([1; 32], 7, [3; 32]));
+}
+
+#[test]
+fn league_standings_input_hash_is_canonical_and_order_independent() {
+    let first = vec![player(2, 3, 1700, 1, &[1, 9]), player(1, 6, 1500, 0, &[2])];
+    let second = vec![player(1, 6, 1900, 0, &[2]), player(2, 3, 1200, 1, &[9, 1])];
+
+    let first_hash = league_standings_input_hash(&first);
+    assert_eq!(first_hash, league_standings_input_hash(&second));
+    assert_eq!(
+        hex::encode(first_hash),
+        "8e8dfd281f6622000963829a77cad38650db821db8b4f58bd67b0bb22dda0288"
+    );
 }
