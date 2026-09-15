@@ -20,7 +20,12 @@ use market_data::{
 };
 use serde::{Deserialize, Serialize};
 
+pub mod api;
 pub mod attestor;
+pub mod auth;
+pub mod db;
+pub mod indexer;
+pub mod profile;
 pub mod proof;
 pub mod recovery;
 pub mod settlement;
@@ -66,6 +71,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Some("phase0-metadata") => record_phase0_metadata().await?,
         Some("phase0-analyze") => analyze_phase0()?,
         Some("attestor-run") => attestor::run().await?,
+        Some("api-serve") => api::serve_from_env().await?,
         Some("proof-serve") => {
             let path = env::args()
                 .nth(2)
@@ -350,6 +356,7 @@ TICKERSIX_PHASE0_ITERATIONS, TICKERSIX_PHASE0_SAMPLE_INTERVAL_SECS
 
 Analysis: cargo run -p backend -- phase0-analyze phase0/attestor-0.ndjson
 Phase 2 attestor: TICKERSIX_ATTESTOR_CONFIG=attestor.json cargo run -p backend -- attestor-run
+Phase 3.1 API: TICKERSIX_DATABASE_URL=postgres://... cargo run -p backend -- api-serve
 Settlement planner: cargo run -p backend -- settlement-plan settlement.json
 Proof endpoint: cargo run -p backend -- proof-serve proof.json [bind]"#
     );
