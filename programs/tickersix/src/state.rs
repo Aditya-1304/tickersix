@@ -38,7 +38,7 @@ pub enum SideStatus {
     Forfeited,
 }
 
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, InitSpace)]
+#[derive(Debug, AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, InitSpace)]
 pub enum BattleResult {
     Pending,
     PlayerA,
@@ -50,7 +50,7 @@ pub enum BattleResult {
     Voided,
 }
 
-#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, InitSpace)]
+#[derive(Debug, AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, InitSpace)]
 pub enum VoidReason {
     None,
     PriceUnavailable,
@@ -143,6 +143,13 @@ pub struct MarketRound {
     pub max_attestor_spread_bps: u16,
     pub eligible_asset_bitmap: [u64; 4],
     pub round_asset_count: u16,
+    /// Number of rated Battles admitted into this frozen round. The count is
+    /// used by the permissionless completion instruction so a caller cannot
+    /// finalize a round while a created Battle is still unresolved.
+    pub rated_battle_count: u32,
+    /// Number of admitted Battles that reached a terminal result, including
+    /// player results, forfeits, price-unavailable voids, and system voids.
+    pub resolved_battle_count: u32,
     pub state: MarketRoundState,
     pub is_replay: bool,
     pub bump: u8,

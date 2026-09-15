@@ -71,6 +71,8 @@ pub enum RelayError {
     InvalidPhase,
     ReportContextMismatch,
     DuplicateReport,
+    InvalidRoundAssets,
+    InvalidSide,
     InsufficientReports,
     TooManyReports,
     MessageTooLarge,
@@ -84,6 +86,8 @@ impl fmt::Display for RelayError {
             Self::InvalidPhase => "price phase must be START (0) or END (1)",
             Self::ReportContextMismatch => "reports do not share the same frozen context",
             Self::DuplicateReport => "finalization contains a duplicate attestor report",
+            Self::InvalidRoundAssets => "settlement requires six unique RoundAsset accounts",
+            Self::InvalidSide => "Battle side index must be 0 or 1",
             Self::InsufficientReports => "finalization requires at least two reports",
             Self::TooManyReports => "finalization accepts at most three reports",
             Self::MessageTooLarge => "canonical report message exceeds Ed25519 message size",
@@ -262,6 +266,144 @@ pub fn build_mark_price_phase_unavailable_instruction(
     })
 }
 
+/// Builds the account layout for one side of the exact Q9 score settlement.
+/// The six RoundAsset addresses are passed in the caller's lineup order; the
+/// program binds each account to the revealed asset id stored in the Battle.
+pub fn build_settle_side_score_instruction(
+    side_index: u8,
+    battle: [u8; 32],
+    market_round: [u8; 32],
+    settler: [u8; 32],
+    round_assets: &[[u8; 32]],
+) -> Result<Instruction, RelayError> {
+    if side_index > 1 {
+        return Err(RelayError::InvalidSide);
+    }
+    let round_assets = unique_round_assets(round_assets, true)?;
+    let mut accounts = vec![
+        writable(address(battle)),
+        readonly(address(market_round)),
+        signer(address(settler)),
+    ];
+    accounts.extend(
+        round_assets
+            .into_iter()
+            .map(|asset| readonly(address(asset))),
+    );
+    Ok(Instruction {
+        program_id: address(tickersix::ID.to_bytes()),
+        accounts,
+        data: tickersix::instruction::SettleSideScore { side_index }.data(),
+    })
+}
+
+/// Builds the permissionless Battle result finalization instruction.
+pub fn build_finalize_battle_instruction(
+    battle: [u8; 32],
+    market_round: [u8; 32],
+    finalizer: [u8; 32],
+) -> Instruction {
+    Instruction {
+        program_id: address(tickersix::ID.to_bytes()),
+        accounts: vec![
+            writable(address(battle)),
+            writable(address(market_round)),
+            signer(address(finalizer)),
+        ],
+        data: tickersix::instruction::FinalizeBattle {}.data(),
+    }
+}
+
+/// Builds the post-reveal-window player-forfeit finalization instruction.
+pub fn build_finalize_forfeit_instruction(
+    battle: [u8; 32],
+    market_round: [u8; 32],
+    finalizer: [u8; 32],
+) -> Instruction {
+    Instruction {
+        program_id: address(tickersix::ID.to_bytes()),
+        accounts: vec![
+            writable(address(battle)),
+            signer(address(finalizer)),
+            writable(address(market_round)),
+        ],
+        data: tickersix::instruction::FinalizeForfeit {}.data(),
+    }
+}
+
+/// Builds the price-unavailable Battle void instruction. No replacement price
+/// or alternate oracle account can be carried by this instruction.
+pub fn build_void_battle_price_unavailable_instruction(
+    battle: [u8; 32],
+    market_round: [u8; 32],
+    marker: [u8; 32],
+    unavailable_round_assets: &[[u8; 32]],
+) -> Result<Instruction, RelayError> {
+    let round_assets = unique_round_assets(unavailable_round_assets, false)?;
+    let mut accounts = vec![
+        writable(address(battle)),
+        writable(address(market_round)),
+        signer(address(marker)),
+    ];
+    accounts.extend(
+        round_assets
+            .into_iter()
+            .map(|asset| readonly(address(asset))),
+    );
+    Ok(Instruction {
+        program_id: address(tickersix::ID.to_bytes()),
+        accounts,
+        data: tickersix::instruction::VoidBattleIfPriceUnavailable {}.data(),
+    })
+}
+
+/// Builds the coordinator-controlled system-incident void instruction.
+pub fn build_void_battle_system_incident_instruction(
+    config: [u8; 32],
+    battle: [u8; 32],
+    market_round: [u8; 32],
+    coordinator: [u8; 32],
+) -> Instruction {
+    Instruction {
+        program_id: address(tickersix::ID.to_bytes()),
+        accounts: vec![
+            readonly(address(config)),
+            writable(address(market_round)),
+            writable(address(battle)),
+            signer(address(coordinator)),
+        ],
+        data: tickersix::instruction::VoidBattleForSystemIncident {}.data(),
+    }
+}
+
+/// Builds the final round transition after all assets and Battles are
+/// terminal. The caller supplies the complete frozen RoundAsset set.
+pub fn build_finalize_market_round_instruction(
+    market_round: [u8; 32],
+    price_policy: [u8; 32],
+    market_quality_policy: [u8; 32],
+    keeper: [u8; 32],
+    round_assets: &[[u8; 32]],
+) -> Result<Instruction, RelayError> {
+    let round_assets = unique_round_assets(round_assets, false)?;
+    let mut accounts = vec![
+        writable(address(market_round)),
+        readonly(address(price_policy)),
+        readonly(address(market_quality_policy)),
+        signer(address(keeper)),
+    ];
+    accounts.extend(
+        round_assets
+            .into_iter()
+            .map(|asset| readonly(address(asset))),
+    );
+    Ok(Instruction {
+        program_id: address(tickersix::ID.to_bytes()),
+        accounts,
+        data: tickersix::instruction::FinalizeMarketRound {}.data(),
+    })
+}
+
 /// Signs a relay plan with an in-memory relayer key and returns a legacy
 /// transaction. The caller must obtain a fresh blockhash and submit the
 /// transaction through its chosen wallet/RPC boundary.
@@ -319,6 +461,26 @@ fn build_ed25519_instruction(
         accounts: Vec::new(),
         data,
     })
+}
+
+fn unique_round_assets(
+    round_assets: &[[u8; 32]],
+    require_six: bool,
+) -> Result<Vec<[u8; 32]>, RelayError> {
+    if require_six && round_assets.len() != 6 {
+        return Err(RelayError::InvalidRoundAssets);
+    }
+    if round_assets.is_empty() {
+        return Err(RelayError::InvalidRoundAssets);
+    }
+    let mut unique = Vec::with_capacity(round_assets.len());
+    for asset in round_assets {
+        if unique.contains(asset) {
+            return Err(RelayError::InvalidRoundAssets);
+        }
+        unique.push(*asset);
+    }
+    Ok(unique)
 }
 
 fn phase_from_u8(value: u8) -> Result<PricePhase, RelayError> {

@@ -150,6 +150,23 @@ fn return_and_captain_score_use_the_canonical_q9_formula() {
 }
 
 #[test]
+fn return_math_truncates_signed_values_and_rejects_i64_output_overflow() {
+    // The negative numerator must truncate toward zero, matching Rust integer
+    // division and the on-chain settlement implementation.
+    assert_eq!(return_q9(3, 2).unwrap(), -333_333_333);
+    assert!(return_q9(1, i64::MAX).is_err());
+}
+
+#[test]
+fn captain_weight_applies_to_negative_returns_without_float_rounding() {
+    let asset_ids = [1, 2, 3, 4, 5, 6];
+    let returns = [-10, -20, 30, 40, 50, 60];
+
+    // Captain 1 has weight two: (-20 - 20 + 30 + 40 + 50 + 60) / 7 = 20.
+    assert_eq!(lineup_score_q9(returns, asset_ids, 1).unwrap(), 20);
+}
+
+#[test]
 fn commitment_is_independent_of_input_order_but_bound_to_battle_and_player() {
     let program_id = [1u8; 32];
     let battle = [2u8; 32];

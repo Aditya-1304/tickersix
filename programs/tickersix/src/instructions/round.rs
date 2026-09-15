@@ -113,6 +113,8 @@ pub fn handle_create_market_round_draft(
     round.max_attestor_spread_bps = ctx.accounts.price_policy.max_attestor_spread_bps;
     round.eligible_asset_bitmap = [0; 4];
     round.round_asset_count = 0;
+    round.rated_battle_count = 0;
+    round.resolved_battle_count = 0;
     round.state = MarketRoundState::Preparing;
     round.is_replay = is_replay;
     round.bump = ctx.bumps.market_round;
@@ -345,6 +347,73 @@ pub fn handle_advance_market_round(ctx: Context<AdvanceMarketRound>) -> Result<(
     Ok(())
 }
 
+#[derive(Accounts)]
+pub struct FinalizeMarketRound<'info> {
+    #[account(
+        mut,
+        seeds = [MARKET_ROUND_SEED, &market_round.round_id.to_le_bytes()],
+        bump = market_round.bump
+    )]
+    pub market_round: Account<'info, MarketRound>,
+    #[account(
+        seeds = [PRICE_POLICY_SEED, &market_round.price_policy_version.to_le_bytes()],
+        bump = price_policy.bump
+    )]
+    pub price_policy: Account<'info, PricePolicy>,
+    #[account(
+        seeds = [QUALITY_POLICY_SEED, &market_round.market_quality_policy_version.to_le_bytes()],
+        bump = market_quality_policy.bump
+    )]
+    pub market_quality_policy: Account<'info, MarketQualityPolicy>,
+    pub keeper: Signer<'info>,
+}
+
+/// Completes a round only after every frozen asset phase and every admitted
+/// Battle has reached a terminal state. The transition is permissionless and
+/// deterministic: one unavailable asset makes the whole round `Voided`.
+pub fn handle_finalize_market_round(ctx: Context<FinalizeMarketRound>) -> Result<()> {
+    let round = &ctx.accounts.market_round;
+    require!(
+        round.state == MarketRoundState::Settling,
+        ErrorCode::InvalidRoundState
+    );
+    require!(
+        round.rated_battle_count == round.resolved_battle_count,
+        ErrorCode::InvalidBattleState
+    );
+
+    validate_round_assets(
+        ctx.remaining_accounts,
+        round.key(),
+        round,
+        round.round_asset_count,
+        &ctx.accounts.price_policy,
+        &ctx.accounts.market_quality_policy,
+    )?;
+
+    let mut round_is_voided = false;
+    for account in ctx.remaining_accounts {
+        let data = account.try_borrow_data()?;
+        let mut data_slice: &[u8] = &data;
+        let asset = RoundAsset::try_deserialize(&mut data_slice)
+            .map_err(|_| error!(ErrorCode::RoundAssetUnavailable))?;
+        require!(
+            (asset.start_finalized || asset.start_unavailable)
+                && (asset.end_finalized || asset.end_unavailable),
+            ErrorCode::RoundAssetUnavailable
+        );
+        round_is_voided |= asset.start_unavailable || asset.end_unavailable;
+    }
+
+    let round = &mut ctx.accounts.market_round;
+    round.state = if round_is_voided {
+        MarketRoundState::Voided
+    } else {
+        MarketRoundState::Finalized
+    };
+    Ok(())
+}
+
 /// Verifies that the caller supplied the complete, canonical set of RoundAsset
 /// accounts for the draft. This prevents a coordinator from omitting an older
 /// asset while adding a duplicate mint or freezing a partial account set.
@@ -437,6 +506,7 @@ fn next_market_round_state(round: &MarketRound, now: i64) -> Result<MarketRoundS
             require!(now >= round.end_target_at, ErrorCode::InvalidRoundState);
             Ok(MarketRoundState::Ended)
         }
+        MarketRoundState::Ended => Ok(MarketRoundState::Settling),
         _ => err!(ErrorCode::InvalidRoundState),
     }
 }
@@ -474,6 +544,8 @@ mod tests {
             max_attestor_spread_bps: 100,
             eligible_asset_bitmap: [1; 4],
             round_asset_count: 1,
+            rated_battle_count: 0,
+            resolved_battle_count: 0,
             state: MarketRoundState::Scheduled,
             is_replay: false,
             bump: 1,

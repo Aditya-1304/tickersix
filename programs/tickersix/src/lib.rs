@@ -200,6 +200,10 @@ pub mod tickersix {
         instructions::round::handle_advance_market_round(ctx)
     }
 
+    pub fn finalize_market_round(ctx: Context<FinalizeMarketRound>) -> Result<()> {
+        instructions::round::handle_finalize_market_round(ctx)
+    }
+
     pub fn create_rated_battle(
         ctx: Context<CreateRatedBattle>,
         battle_id: u64,
@@ -280,6 +284,12 @@ pub mod tickersix {
 
     pub fn finalize_battle(ctx: Context<FinalizeBattle>) -> Result<()> {
         instructions::battle::handle_finalize_battle(ctx)
+    }
+
+    pub fn void_battle_for_system_incident(
+        ctx: Context<VoidBattleForSystemIncident>,
+    ) -> Result<()> {
+        instructions::battle::handle_void_battle_for_system_incident(ctx)
     }
 
     pub fn finalize_forfeit(ctx: Context<FinalizeForfeit>) -> Result<()> {

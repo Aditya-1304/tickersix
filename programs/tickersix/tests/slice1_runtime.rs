@@ -531,6 +531,143 @@ fn create_ranked_battle(
     battle
 }
 
+fn advance_round(harness: &mut Harness, round: Pubkey) {
+    // LiteSVM otherwise reuses the same recent blockhash for identical keeper
+    // instructions, producing the runtime's legitimate AlreadyProcessed
+    // rejection instead of exercising the next clock boundary.
+    harness.svm.expire_blockhash();
+    harness
+        .submit(
+            Arc::clone(&harness.coordinator),
+            Instruction {
+                program_id: address(tickersix::ID),
+                accounts: vec![writable(round), readonly_signer(key(&harness.coordinator))],
+                data: tickersix::instruction::AdvanceMarketRound {}.data(),
+            },
+            &[],
+        )
+        .unwrap();
+}
+
+#[allow(clippy::too_many_arguments)]
+fn submit_attestation(
+    harness: &mut Harness,
+    round: Pubkey,
+    round_asset: Pubkey,
+    asset_id: u16,
+    scoring_mint: Pubkey,
+    phase: tickersix::PricePhase,
+    price_q9: i64,
+    attestor: &Keypair,
+    evidence_root: [u8; 32],
+    report_created_at: i64,
+    last_source_block_id: u64,
+) -> Pubkey {
+    let price_policy = pda(&[tickersix::PRICE_POLICY_SEED, &1u16.to_le_bytes()]);
+    let quality_policy = pda(&[tickersix::QUALITY_POLICY_SEED, &1u16.to_le_bytes()]);
+    let attestor_set = pda(&[tickersix::ATTESTOR_SET_SEED, &1u16.to_le_bytes()]);
+    let (window_start, window_end) = match phase {
+        tickersix::PricePhase::Start => (140, 150),
+        tickersix::PricePhase::End => (150, 160),
+    };
+    let message = tickersix::instructions::price::canonical_attestation_message(
+        tickersix::ID,
+        round,
+        round_asset,
+        asset_id,
+        scoring_mint,
+        1,
+        1,
+        1,
+        phase,
+        price_q9,
+        1,
+        1,
+        last_source_block_id,
+        last_source_block_id,
+        evidence_root,
+        window_start,
+        window_end,
+        report_created_at,
+    );
+    let attestor_key = key(attestor);
+    let price_attestation = pda(&[
+        tickersix::PRICE_ATTESTATION_SEED,
+        round_asset.as_ref(),
+        &[phase as u8],
+        attestor_key.as_ref(),
+    ]);
+    let accounts = vec![
+        readonly(round_asset),
+        readonly(round),
+        readonly(price_policy),
+        readonly(quality_policy),
+        readonly(attestor_set),
+        readonly(attestor_key),
+        writable(price_attestation),
+        writable_signer(key(&harness.coordinator)),
+        readonly(solana_instructions_sysvar::ID),
+        system_program(),
+    ];
+    harness
+        .submit_transaction(
+            &harness.coordinator.clone(),
+            &[
+                ed25519_instruction(&message, attestor),
+                Instruction {
+                    program_id: address(tickersix::ID),
+                    accounts,
+                    data: tickersix::instruction::SubmitPriceAttestation {
+                        phase,
+                        median_price_q9: price_q9,
+                        accepted_observation_count: 1,
+                        unique_source_block_count: 1,
+                        first_source_block_id: last_source_block_id,
+                        last_source_block_id,
+                        evidence_root,
+                        report_created_at,
+                    }
+                    .data(),
+                },
+            ],
+            &[],
+        )
+        .unwrap();
+    price_attestation
+}
+
+fn finalize_price_phase(
+    harness: &mut Harness,
+    round: Pubkey,
+    round_asset: Pubkey,
+    phase: tickersix::PricePhase,
+    reports: &[Pubkey],
+) {
+    let price_policy = pda(&[tickersix::PRICE_POLICY_SEED, &1u16.to_le_bytes()]);
+    let quality_policy = pda(&[tickersix::QUALITY_POLICY_SEED, &1u16.to_le_bytes()]);
+    let attestor_set = pda(&[tickersix::ATTESTOR_SET_SEED, &1u16.to_le_bytes()]);
+    let mut accounts = vec![
+        writable(round_asset),
+        readonly(round),
+        readonly(price_policy),
+        readonly(quality_policy),
+        readonly(attestor_set),
+        writable_signer(key(&harness.coordinator)),
+    ];
+    accounts.extend(reports.iter().copied().map(readonly));
+    harness
+        .submit(
+            Arc::clone(&harness.coordinator),
+            Instruction {
+                program_id: address(tickersix::ID),
+                accounts,
+                data: tickersix::instruction::FinalizePricePhase { phase }.data(),
+            },
+            &[],
+        )
+        .unwrap();
+}
+
 #[test]
 fn reveal_requires_authoritative_reveal_open_state() {
     // Regression target: wall-clock checks alone must not allow a reveal while
@@ -1699,4 +1836,476 @@ fn official_league_battle_requires_active_members_in_the_current_round() {
     assert_eq!(battle_state.league, league);
     assert_eq!(battle_state.league_round_no, 1);
     assert_eq!(league_state.current_round, 1);
+}
+
+#[test]
+fn gate2_settles_exact_returns_scores_and_market_round() {
+    // Full Slice 2.3 regression: two compatible attestors must settle every
+    // selected asset, an outlier must be ignored, a missing third attestor must
+    // be tolerated, and the Battle must finish from exact on-chain Q9 values.
+    let mut harness = Harness::new();
+    let attestor_a = Keypair::new();
+    let attestor_b = Keypair::new();
+    let attestor_c = Keypair::new();
+    let (round, round_assets) = harness.create_and_freeze_round_with_attestors([
+        key(&attestor_a),
+        key(&attestor_b),
+        key(&attestor_c),
+    ]);
+    let player_a = Keypair::new();
+    let player_b = Keypair::new();
+
+    harness.set_time(110, 110);
+    advance_round(&mut harness, round);
+    let battle = create_ranked_battle(&mut harness, round, 301, &player_a, &player_b);
+    let lineup = [0, 1, 2, 3, 4, 5];
+    let salt_a = [31; 32];
+    let salt_b = [32; 32];
+    for (player, salt, captain) in [(&player_a, salt_a, 0), (&player_b, salt_b, 1)] {
+        let commitment = tickersix::math::canonical_lineup_commitment(
+            tickersix::ID,
+            battle,
+            key(player),
+            1,
+            lineup,
+            captain,
+            salt,
+        );
+        harness
+            .submit(
+                Arc::clone(&harness.coordinator),
+                Instruction {
+                    program_id: address(tickersix::ID),
+                    accounts: vec![
+                        readonly(harness.config),
+                        writable(battle),
+                        readonly(round),
+                        readonly_signer(key(player)),
+                    ],
+                    data: tickersix::instruction::CommitLineup { commitment }.data(),
+                },
+                &[player],
+            )
+            .unwrap();
+    }
+
+    harness.set_time(120, 120);
+    advance_round(&mut harness, round);
+    harness.set_time(125, 125);
+    for (player, salt, captain) in [(&player_a, salt_a, 0), (&player_b, salt_b, 1)] {
+        harness
+            .submit(
+                Arc::clone(&harness.coordinator),
+                Instruction {
+                    program_id: address(tickersix::ID),
+                    accounts: vec![
+                        writable(battle),
+                        readonly(round),
+                        readonly_signer(key(player)),
+                    ],
+                    data: tickersix::instruction::RevealLineup {
+                        asset_ids: lineup,
+                        captain_asset_id: captain,
+                        salt,
+                    }
+                    .data(),
+                },
+                &[player],
+            )
+            .unwrap();
+    }
+
+    harness.set_time(140, 140);
+    advance_round(&mut harness, round);
+    harness.set_time(150, 150);
+    advance_round(&mut harness, round);
+
+    let start_prices = [
+        100_000_000_000,
+        100_000_000_000,
+        100_000_000_000,
+        100_000_000_000,
+        100_000_000_000,
+        100_000_000_000,
+    ];
+    let end_prices = [
+        110_000_000_000,
+        90_000_000_000,
+        100_000_000_000,
+        100_000_000_000,
+        100_000_000_000,
+        100_000_000_000,
+    ];
+
+    let mut start_reports = Vec::with_capacity(6);
+    for asset_id in 0..6 {
+        let asset = round_assets[asset_id];
+        let mint = Pubkey::new_from_array([100 + asset_id as u8; 32]);
+        let root_a = [40 + asset_id as u8; 32];
+        let root_b = [60 + asset_id as u8; 32];
+        let report_a = submit_attestation(
+            &mut harness,
+            round,
+            asset,
+            asset_id as u16,
+            mint,
+            tickersix::PricePhase::Start,
+            start_prices[asset_id],
+            &attestor_a,
+            root_a,
+            150,
+            149,
+        );
+        let report_b = submit_attestation(
+            &mut harness,
+            round,
+            asset,
+            asset_id as u16,
+            mint,
+            tickersix::PricePhase::Start,
+            start_prices[asset_id],
+            &attestor_b,
+            root_b,
+            150,
+            149,
+        );
+        let mut reports = vec![report_a, report_b];
+        if asset_id == 0 {
+            // This validly signed report is outside the compatible spread and
+            // proves the quorum selector does not let an outlier control price.
+            reports.push(submit_attestation(
+                &mut harness,
+                round,
+                asset,
+                asset_id as u16,
+                mint,
+                tickersix::PricePhase::Start,
+                1_000_000_000_000,
+                &attestor_c,
+                [90; 32],
+                150,
+                149,
+            ));
+        }
+        start_reports.push(reports);
+    }
+    harness.set_time(171, 171);
+    for (asset_id, reports) in start_reports.iter().enumerate() {
+        finalize_price_phase(
+            &mut harness,
+            round,
+            round_assets[asset_id],
+            tickersix::PricePhase::Start,
+            reports,
+        );
+    }
+
+    harness.set_time(160, 160);
+    let mut end_reports = Vec::with_capacity(6);
+    for asset_id in 0..6 {
+        let asset = round_assets[asset_id];
+        let mint = Pubkey::new_from_array([100 + asset_id as u8; 32]);
+        let report_a = submit_attestation(
+            &mut harness,
+            round,
+            asset,
+            asset_id as u16,
+            mint,
+            tickersix::PricePhase::End,
+            end_prices[asset_id],
+            &attestor_a,
+            [110 + asset_id as u8; 32],
+            160,
+            159,
+        );
+        let report_b = submit_attestation(
+            &mut harness,
+            round,
+            asset,
+            asset_id as u16,
+            mint,
+            tickersix::PricePhase::End,
+            end_prices[asset_id],
+            &attestor_b,
+            [130 + asset_id as u8; 32],
+            160,
+            159,
+        );
+        // No C report is supplied for the end phase: the two compatible
+        // reports are sufficient and the missing attestor is not replaced.
+        end_reports.push(vec![report_b, report_a]);
+    }
+    harness.set_time(171, 171);
+    for (asset_id, reports) in end_reports.iter().enumerate() {
+        finalize_price_phase(
+            &mut harness,
+            round,
+            round_assets[asset_id],
+            tickersix::PricePhase::End,
+            reports,
+        );
+    }
+
+    for (asset_id, expected_return) in [
+        (0, 100_000_000),
+        (1, -100_000_000),
+        (2, 0),
+        (3, 0),
+        (4, 0),
+        (5, 0),
+    ] {
+        let asset = harness.account::<tickersix::RoundAsset>(round_assets[asset_id]);
+        assert!(asset.start_finalized && asset.end_finalized && asset.available);
+        assert_eq!(asset.return_q9, expected_return);
+    }
+
+    harness.set_time(180, 180);
+    advance_round(&mut harness, round);
+    for side_index in 0..=1 {
+        harness
+            .submit(
+                Arc::clone(&harness.coordinator),
+                Instruction {
+                    program_id: address(tickersix::ID),
+                    accounts: {
+                        let mut accounts = vec![
+                            writable(battle),
+                            readonly(round),
+                            readonly_signer(key(&harness.coordinator)),
+                        ];
+                        accounts.extend(round_assets.iter().copied().map(readonly));
+                        accounts
+                    },
+                    data: tickersix::instruction::SettleSideScore { side_index }.data(),
+                },
+                &[],
+            )
+            .unwrap();
+    }
+    let settled = harness.account::<tickersix::Battle>(battle);
+    assert_eq!(settled.a.score_q9, 14_285_714);
+    assert_eq!(settled.b.score_q9, -14_285_714);
+
+    harness
+        .submit(
+            Arc::clone(&harness.coordinator),
+            Instruction {
+                program_id: address(tickersix::ID),
+                accounts: vec![
+                    writable(battle),
+                    writable(round),
+                    readonly_signer(key(&harness.coordinator)),
+                ],
+                data: tickersix::instruction::FinalizeBattle {}.data(),
+            },
+            &[],
+        )
+        .unwrap();
+    assert_eq!(
+        harness.account::<tickersix::Battle>(battle).result,
+        tickersix::BattleResult::PlayerA
+    );
+
+    let price_policy = pda(&[tickersix::PRICE_POLICY_SEED, &1u16.to_le_bytes()]);
+    let quality_policy = pda(&[tickersix::QUALITY_POLICY_SEED, &1u16.to_le_bytes()]);
+    harness
+        .submit(
+            Arc::clone(&harness.coordinator),
+            Instruction {
+                program_id: address(tickersix::ID),
+                accounts: {
+                    let mut accounts = vec![
+                        writable(round),
+                        readonly(price_policy),
+                        readonly(quality_policy),
+                        readonly_signer(key(&harness.coordinator)),
+                    ];
+                    accounts.extend(round_assets.iter().copied().map(readonly));
+                    accounts
+                },
+                data: tickersix::instruction::FinalizeMarketRound {}.data(),
+            },
+            &[],
+        )
+        .unwrap();
+    assert_eq!(
+        harness.account::<tickersix::MarketRound>(round).state,
+        tickersix::MarketRoundState::Finalized
+    );
+}
+
+#[test]
+fn unavailable_price_voids_battle_and_system_incident_stays_distinct() {
+    // Regression target: selected price failure must produce PriceUnavailable,
+    // while a paused-platform incident must produce SystemIncident rather than
+    // being misclassified as a player forfeit.
+    let mut harness = Harness::new();
+    let (round, round_assets) = harness.create_and_freeze_round();
+    let player_a = Keypair::new();
+    let player_b = Keypair::new();
+    let incident_player_a = Keypair::new();
+    let incident_player_b = Keypair::new();
+
+    harness.set_time(110, 110);
+    advance_round(&mut harness, round);
+    let battle = create_ranked_battle(&mut harness, round, 302, &player_a, &player_b);
+    let incident_battle = create_ranked_battle(
+        &mut harness,
+        round,
+        303,
+        &incident_player_a,
+        &incident_player_b,
+    );
+    let lineup = [0, 1, 2, 3, 4, 5];
+    for (player, salt, captain) in [(&player_a, [71; 32], 0), (&player_b, [72; 32], 1)] {
+        let commitment = tickersix::math::canonical_lineup_commitment(
+            tickersix::ID,
+            battle,
+            key(player),
+            1,
+            lineup,
+            captain,
+            salt,
+        );
+        harness
+            .submit(
+                Arc::clone(&harness.coordinator),
+                Instruction {
+                    program_id: address(tickersix::ID),
+                    accounts: vec![
+                        readonly(harness.config),
+                        writable(battle),
+                        readonly(round),
+                        readonly_signer(key(player)),
+                    ],
+                    data: tickersix::instruction::CommitLineup { commitment }.data(),
+                },
+                &[player],
+            )
+            .unwrap();
+    }
+    harness.set_time(120, 120);
+    advance_round(&mut harness, round);
+    harness.set_time(125, 125);
+    for (player, salt, captain) in [(&player_a, [71; 32], 0), (&player_b, [72; 32], 1)] {
+        harness
+            .submit(
+                Arc::clone(&harness.coordinator),
+                Instruction {
+                    program_id: address(tickersix::ID),
+                    accounts: vec![
+                        writable(battle),
+                        readonly(round),
+                        readonly_signer(key(player)),
+                    ],
+                    data: tickersix::instruction::RevealLineup {
+                        asset_ids: lineup,
+                        captain_asset_id: captain,
+                        salt,
+                    }
+                    .data(),
+                },
+                &[player],
+            )
+            .unwrap();
+    }
+
+    // Mark the first asset unavailable in both phases after their deadlines.
+    for (phase, timestamp) in [
+        (tickersix::PricePhase::Start, 161),
+        (tickersix::PricePhase::End, 171),
+    ] {
+        harness.set_time(timestamp, timestamp as u64);
+        let price_policy = pda(&[tickersix::PRICE_POLICY_SEED, &1u16.to_le_bytes()]);
+        let attestor_set = pda(&[tickersix::ATTESTOR_SET_SEED, &1u16.to_le_bytes()]);
+        let reports = [
+            Pubkey::new_from_array([11; 32]),
+            Pubkey::new_from_array([12; 32]),
+            Pubkey::new_from_array([13; 32]),
+        ]
+        .map(|attestor| {
+            pda(&[
+                tickersix::PRICE_ATTESTATION_SEED,
+                round_assets[0].as_ref(),
+                &[phase as u8],
+                attestor.as_ref(),
+            ])
+        });
+        harness
+            .submit(
+                Arc::clone(&harness.coordinator),
+                Instruction {
+                    program_id: address(tickersix::ID),
+                    accounts: {
+                        let mut accounts = vec![
+                            writable(round_assets[0]),
+                            readonly(round),
+                            readonly(price_policy),
+                            readonly(attestor_set),
+                            writable_signer(key(&harness.coordinator)),
+                        ];
+                        accounts.extend(reports.iter().copied().map(readonly));
+                        accounts
+                    },
+                    data: tickersix::instruction::MarkPricePhaseUnavailable { phase }.data(),
+                },
+                &[],
+            )
+            .unwrap();
+    }
+
+    let price_void_accounts = vec![
+        writable(battle),
+        writable(round),
+        readonly_signer(key(&harness.coordinator)),
+        readonly(round_assets[0]),
+    ];
+    harness
+        .submit(
+            Arc::clone(&harness.coordinator),
+            Instruction {
+                program_id: address(tickersix::ID),
+                accounts: price_void_accounts,
+                data: tickersix::instruction::VoidBattleIfPriceUnavailable {}.data(),
+            },
+            &[],
+        )
+        .unwrap();
+    let voided = harness.account::<tickersix::Battle>(battle);
+    assert_eq!(voided.result, tickersix::BattleResult::Voided);
+    assert_eq!(voided.void_reason, tickersix::VoidReason::PriceUnavailable);
+
+    let pause_instruction = Instruction {
+        program_id: address(tickersix::ID),
+        accounts: vec![
+            writable(harness.config),
+            readonly_signer(key(&harness.coordinator)),
+        ],
+        data: tickersix::instruction::SetPause { paused: true }.data(),
+    };
+    harness
+        .submit(harness.coordinator.clone(), pause_instruction, &[])
+        .unwrap();
+    harness
+        .submit(
+            Arc::clone(&harness.coordinator),
+            Instruction {
+                program_id: address(tickersix::ID),
+                accounts: vec![
+                    readonly(harness.config),
+                    writable(round),
+                    writable(incident_battle),
+                    readonly_signer(key(&harness.coordinator)),
+                ],
+                data: tickersix::instruction::VoidBattleForSystemIncident {}.data(),
+            },
+            &[],
+        )
+        .unwrap();
+    assert_eq!(
+        harness
+            .account::<tickersix::Battle>(incident_battle)
+            .void_reason,
+        tickersix::VoidReason::SystemIncident
+    );
 }

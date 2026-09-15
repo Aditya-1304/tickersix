@@ -193,6 +193,13 @@ pub fn handle_create_rated_battle(
     battle.finalized_at = 0;
     battle.bump = ctx.bumps.battle;
 
+    ctx.accounts.market_round.rated_battle_count = ctx
+        .accounts
+        .market_round
+        .rated_battle_count
+        .checked_add(1)
+        .ok_or_else(|| error!(ErrorCode::MathOverflow))?;
+
     let market_round = ctx.accounts.market_round.key();
     let battle_key = battle.key();
     for (slot, player) in [
@@ -259,8 +266,19 @@ pub struct CommitLineup<'info> {
 pub struct CancelUncommittedBattle<'info> {
     #[account(seeds = [CONFIG_SEED], bump = config.bump)]
     pub config: Account<'info, Config>,
+    #[account(
+        mut,
+        seeds = [crate::constants::MARKET_ROUND_SEED, &market_round.round_id.to_le_bytes()],
+        bump = market_round.bump
+    )]
+    pub market_round: Account<'info, MarketRound>,
     pub coordinator: Signer<'info>,
-    #[account(mut)]
+    #[account(
+        mut,
+        seeds = [BATTLE_SEED, market_round.key().as_ref(), &battle.battle_id.to_le_bytes()],
+        bump = battle.bump,
+        constraint = battle.market_round == market_round.key() @ ErrorCode::WrongMarketRound
+    )]
     pub battle: Account<'info, Battle>,
 }
 
@@ -282,6 +300,12 @@ pub fn handle_cancel_uncommitted_battle(ctx: Context<CancelUncommittedBattle>) -
     battle.result = BattleResult::Voided;
     battle.void_reason = VoidReason::SystemIncident;
     battle.finalized_at = Clock::get()?.unix_timestamp;
+    ctx.accounts.market_round.resolved_battle_count = ctx
+        .accounts
+        .market_round
+        .resolved_battle_count
+        .checked_add(1)
+        .ok_or_else(|| error!(ErrorCode::MathOverflow))?;
     Ok(())
 }
 
@@ -401,7 +425,12 @@ fn side_for_player_mut(battle: &mut Battle, player: Pubkey) -> Result<&mut Battl
 
 #[derive(Accounts)]
 pub struct SettleSideScore<'info> {
-    #[account(mut)]
+    #[account(
+        mut,
+        seeds = [BATTLE_SEED, market_round.key().as_ref(), &battle.battle_id.to_le_bytes()],
+        bump = battle.bump,
+        constraint = battle.market_round == market_round.key() @ ErrorCode::WrongMarketRound
+    )]
     pub battle: Account<'info, Battle>,
     #[account(
         seeds = [crate::constants::MARKET_ROUND_SEED, &market_round.round_id.to_le_bytes()],
@@ -423,6 +452,10 @@ pub fn handle_settle_side_score(ctx: Context<SettleSideScore>, side_index: u8) -
             side.score_finalized,
         )
     };
+    require!(
+        ctx.accounts.battle.result == BattleResult::Pending,
+        ErrorCode::BattleAlreadyFinalized
+    );
     require!(revealed, ErrorCode::InvalidBattleState);
     require!(!score_finalized, ErrorCode::InvalidBattleState);
     require!(
@@ -486,8 +519,19 @@ pub fn handle_settle_side_score(ctx: Context<SettleSideScore>, side_index: u8) -
 
 #[derive(Accounts)]
 pub struct FinalizeBattle<'info> {
-    #[account(mut)]
+    #[account(
+        mut,
+        seeds = [BATTLE_SEED, market_round.key().as_ref(), &battle.battle_id.to_le_bytes()],
+        bump = battle.bump,
+        constraint = battle.market_round == market_round.key() @ ErrorCode::WrongMarketRound
+    )]
     pub battle: Account<'info, Battle>,
+    #[account(
+        mut,
+        seeds = [crate::constants::MARKET_ROUND_SEED, &market_round.round_id.to_le_bytes()],
+        bump = market_round.bump
+    )]
+    pub market_round: Account<'info, MarketRound>,
     pub finalizer: Signer<'info>,
 }
 
@@ -509,15 +553,27 @@ pub fn handle_finalize_battle(ctx: Context<FinalizeBattle>) -> Result<()> {
         BattleResult::Draw
     };
     battle.finalized_at = Clock::get()?.unix_timestamp;
+    ctx.accounts.market_round.resolved_battle_count = ctx
+        .accounts
+        .market_round
+        .resolved_battle_count
+        .checked_add(1)
+        .ok_or_else(|| error!(ErrorCode::MathOverflow))?;
     Ok(())
 }
 
 #[derive(Accounts)]
 pub struct FinalizeForfeit<'info> {
-    #[account(mut)]
+    #[account(
+        mut,
+        seeds = [BATTLE_SEED, market_round.key().as_ref(), &battle.battle_id.to_le_bytes()],
+        bump = battle.bump,
+        constraint = battle.market_round == market_round.key() @ ErrorCode::WrongMarketRound
+    )]
     pub battle: Account<'info, Battle>,
     pub finalizer: Signer<'info>,
     #[account(
+        mut,
         seeds = [crate::constants::MARKET_ROUND_SEED, &market_round.round_id.to_le_bytes()],
         bump = market_round.bump
     )]
@@ -555,14 +611,26 @@ pub fn handle_finalize_forfeit(ctx: Context<FinalizeForfeit>) -> Result<()> {
         battle.b.status = SideStatus::Forfeited;
     }
     battle.finalized_at = Clock::get()?.unix_timestamp;
+    ctx.accounts.market_round.resolved_battle_count = ctx
+        .accounts
+        .market_round
+        .resolved_battle_count
+        .checked_add(1)
+        .ok_or_else(|| error!(ErrorCode::MathOverflow))?;
     Ok(())
 }
 
 #[derive(Accounts)]
 pub struct VoidBattleIfPriceUnavailable<'info> {
-    #[account(mut)]
+    #[account(
+        mut,
+        seeds = [BATTLE_SEED, market_round.key().as_ref(), &battle.battle_id.to_le_bytes()],
+        bump = battle.bump,
+        constraint = battle.market_round == market_round.key() @ ErrorCode::WrongMarketRound
+    )]
     pub battle: Account<'info, Battle>,
     #[account(
+        mut,
         seeds = [crate::constants::MARKET_ROUND_SEED, &market_round.round_id.to_le_bytes()],
         bump = market_round.bump,
         constraint = battle.market_round == market_round.key() @ ErrorCode::WrongMarketRound
@@ -623,6 +691,61 @@ pub fn handle_void_battle_if_price_unavailable(
     battle.result = BattleResult::Voided;
     battle.void_reason = VoidReason::PriceUnavailable;
     battle.finalized_at = Clock::get()?.unix_timestamp;
+    ctx.accounts.market_round.resolved_battle_count = ctx
+        .accounts
+        .market_round
+        .resolved_battle_count
+        .checked_add(1)
+        .ok_or_else(|| error!(ErrorCode::MathOverflow))?;
+    Ok(())
+}
+
+/// Voids a pending Battle for a declared platform or settlement incident.
+/// This path is coordinator-controlled and requires the protocol pause, which
+/// keeps infrastructure failure distinct from a player's reveal forfeit.
+#[derive(Accounts)]
+pub struct VoidBattleForSystemIncident<'info> {
+    #[account(seeds = [CONFIG_SEED], bump = config.bump)]
+    pub config: Account<'info, Config>,
+    #[account(
+        mut,
+        seeds = [crate::constants::MARKET_ROUND_SEED, &market_round.round_id.to_le_bytes()],
+        bump = market_round.bump
+    )]
+    pub market_round: Account<'info, MarketRound>,
+    #[account(
+        mut,
+        seeds = [BATTLE_SEED, market_round.key().as_ref(), &battle.battle_id.to_le_bytes()],
+        bump = battle.bump,
+        constraint = battle.market_round == market_round.key() @ ErrorCode::WrongMarketRound
+    )]
+    pub battle: Account<'info, Battle>,
+    pub coordinator: Signer<'info>,
+}
+
+pub fn handle_void_battle_for_system_incident(
+    ctx: Context<VoidBattleForSystemIncident>,
+) -> Result<()> {
+    require_keys_eq!(
+        ctx.accounts.config.coordinator_authority,
+        ctx.accounts.coordinator.key(),
+        ErrorCode::UnauthorizedCoordinator
+    );
+    require!(ctx.accounts.config.paused, ErrorCode::InvalidBattleState);
+    let battle = &mut ctx.accounts.battle;
+    require!(
+        battle.result == BattleResult::Pending,
+        ErrorCode::BattleAlreadyFinalized
+    );
+    battle.result = BattleResult::Voided;
+    battle.void_reason = VoidReason::SystemIncident;
+    battle.finalized_at = Clock::get()?.unix_timestamp;
+    ctx.accounts.market_round.resolved_battle_count = ctx
+        .accounts
+        .market_round
+        .resolved_battle_count
+        .checked_add(1)
+        .ok_or_else(|| error!(ErrorCode::MathOverflow))?;
     Ok(())
 }
 
@@ -710,6 +833,8 @@ mod tests {
             max_attestor_spread_bps: 100,
             eligible_asset_bitmap: [1; 4],
             round_asset_count: 1,
+            rated_battle_count: 0,
+            resolved_battle_count: 0,
             state: MarketRoundState::Scheduled,
             is_replay: false,
             bump: 1,

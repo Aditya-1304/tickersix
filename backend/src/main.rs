@@ -21,7 +21,9 @@ use market_data::{
 use serde::{Deserialize, Serialize};
 
 pub mod attestor;
+pub mod proof;
 pub mod recovery;
+pub mod settlement;
 
 const DEFAULT_ITERATIONS: usize = 1;
 const DEFAULT_SAMPLE_INTERVAL_SECS: u64 = 5;
@@ -64,6 +66,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Some("phase0-metadata") => record_phase0_metadata().await?,
         Some("phase0-analyze") => analyze_phase0()?,
         Some("attestor-run") => attestor::run().await?,
+        Some("proof-serve") => {
+            let path = env::args()
+                .nth(2)
+                .ok_or("usage: cargo run -p backend -- proof-serve <snapshot.json> [bind]")?;
+            let bind = env::args()
+                .nth(3)
+                .unwrap_or_else(|| "127.0.0.1:8787".to_owned());
+            proof::serve_from_file(path, &bind)?;
+        }
+        Some("settlement-plan") => {
+            let path = env::args()
+                .nth(2)
+                .ok_or("usage: cargo run -p backend -- settlement-plan <snapshot.json>")?;
+            settlement::plan_from_file(path)?;
+        }
         _ => print_usage(),
     }
 
@@ -323,13 +340,17 @@ fn now_unix_ms() -> Result<i64, Box<dyn Error>> {
 
 fn print_usage() {
     println!(
-        "Usage: cargo run -p backend -- phase0-record\n\
-         Metadata: cargo run -p backend -- phase0-metadata\n\n\
-         Required: TICKERSIX_PHASE0_MINTS=mint_a,mint_b,...\n\
-         Optional: TICKERSIX_JUPITER_API_KEY, TICKERSIX_PHASE0_OUTPUT,\n\
-         TICKERSIX_PHASE0_ATTESTOR_ID, TICKERSIX_PHASE0_ATTESTOR_INDEX,\n\
-         TICKERSIX_PHASE0_ITERATIONS, TICKERSIX_PHASE0_SAMPLE_INTERVAL_SECS\n\n\
-         Analysis: cargo run -p backend -- phase0-analyze phase0/attestor-0.ndjson\n\
-         Phase 2 attestor: TICKERSIX_ATTESTOR_CONFIG=attestor.json \\\n+         cargo run -p backend -- attestor-run"
+        r#"Usage: cargo run -p backend -- phase0-record
+Metadata: cargo run -p backend -- phase0-metadata
+
+Required: TICKERSIX_PHASE0_MINTS=mint_a,mint_b,...
+Optional: TICKERSIX_JUPITER_API_KEY, TICKERSIX_PHASE0_OUTPUT,
+TICKERSIX_PHASE0_ATTESTOR_ID, TICKERSIX_PHASE0_ATTESTOR_INDEX,
+TICKERSIX_PHASE0_ITERATIONS, TICKERSIX_PHASE0_SAMPLE_INTERVAL_SECS
+
+Analysis: cargo run -p backend -- phase0-analyze phase0/attestor-0.ndjson
+Phase 2 attestor: TICKERSIX_ATTESTOR_CONFIG=attestor.json cargo run -p backend -- attestor-run
+Settlement planner: cargo run -p backend -- settlement-plan settlement.json
+Proof endpoint: cargo run -p backend -- proof-serve proof.json [bind]"#
     );
 }

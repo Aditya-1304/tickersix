@@ -1,8 +1,11 @@
 use market_data::{AttestorSigner, CanonicalPriceReport, PriceReportContext, SignedAttestorReport};
 use relay::{
-    build_finalize_price_phase_instruction, build_mark_price_phase_unavailable_instruction,
-    build_signed_legacy_relay_transaction, build_submit_price_attestation_plan, FinalizeAccounts,
-    RelayAccounts, RelayError,
+    build_finalize_battle_instruction, build_finalize_forfeit_instruction,
+    build_finalize_market_round_instruction, build_finalize_price_phase_instruction,
+    build_mark_price_phase_unavailable_instruction, build_settle_side_score_instruction,
+    build_signed_legacy_relay_transaction, build_submit_price_attestation_plan,
+    build_void_battle_price_unavailable_instruction, build_void_battle_system_incident_instruction,
+    FinalizeAccounts, RelayAccounts, RelayError,
 };
 use solana_address::Address;
 use solana_hash::Hash;
@@ -205,4 +208,46 @@ fn unavailable_plan_is_explicit_and_has_no_price_payload() {
         [[9; 32], [10; 32], [11; 32]],
     )
     .is_err());
+}
+
+#[test]
+fn battle_builders_preserve_mutability_and_reject_malformed_asset_sets() {
+    let round_assets = [[1; 32], [2; 32], [3; 32], [4; 32], [5; 32], [6; 32]];
+    let settle =
+        build_settle_side_score_instruction(0, [20; 32], [21; 32], [22; 32], &round_assets)
+            .unwrap();
+    assert_eq!(settle.accounts.len(), 9);
+    assert!(settle.accounts[0].is_writable);
+    assert!(settle.accounts[2].is_signer);
+
+    let finalize = build_finalize_battle_instruction([20; 32], [21; 32], [22; 32]);
+    assert!(finalize.accounts[0].is_writable && finalize.accounts[1].is_writable);
+    let forfeit = build_finalize_forfeit_instruction([20; 32], [21; 32], [22; 32]);
+    assert!(forfeit.accounts[0].is_writable && forfeit.accounts[2].is_writable);
+    let void =
+        build_void_battle_price_unavailable_instruction([20; 32], [21; 32], [22; 32], &[[1; 32]])
+            .unwrap();
+    assert_eq!(void.accounts.len(), 4);
+    let incident =
+        build_void_battle_system_incident_instruction([23; 32], [20; 32], [21; 32], [22; 32]);
+    assert!(incident.accounts[1].is_writable && incident.accounts[2].is_writable);
+    let round = build_finalize_market_round_instruction(
+        [21; 32],
+        [24; 32],
+        [25; 32],
+        [22; 32],
+        &round_assets,
+    )
+    .unwrap();
+    assert_eq!(round.accounts.len(), 10);
+    assert!(round.accounts[0].is_writable);
+
+    assert!(matches!(
+        build_settle_side_score_instruction(2, [20; 32], [21; 32], [22; 32], &round_assets),
+        Err(RelayError::InvalidSide)
+    ));
+    assert!(matches!(
+        build_settle_side_score_instruction(0, [20; 32], [21; 32], [22; 32], &round_assets[..5]),
+        Err(RelayError::InvalidRoundAssets)
+    ));
 }
