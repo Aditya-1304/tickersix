@@ -24,6 +24,7 @@ use crate::{
     auth::{self, AuthError},
     db,
     leaderboard::{self, LeaderboardError},
+    league::{self, LeagueError},
     live::{self, LiveError},
     profile::{self, ProfileError, ProfileUpdate},
     ranked::{self, RankedError},
@@ -56,6 +57,11 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/profiles/:wallet/history", get(get_profile_history))
         .route("/v1/profile/me", put(update_my_profile))
         .route("/v1/market-rounds/next", get(get_next_market_round))
+        .route("/v1/leagues", get(list_leagues))
+        .route("/v1/leagues/:id", get(get_league))
+        .route("/v1/leagues/:id/join", post(join_league))
+        .route("/v1/leagues/:id/leave", post(leave_league))
+        .route("/v1/leagues/:id/rounds", get(get_league_rounds))
         .route(
             "/v1/ranked/queue",
             post(join_ranked_queue).delete(leave_ranked_queue),
@@ -104,6 +110,7 @@ struct ErrorBody {
 pub enum ApiError {
     Auth(AuthError),
     Leaderboard(LeaderboardError),
+    League(LeagueError),
     Live(LiveError),
     Profile(ProfileError),
     Ranked(RankedError),
@@ -115,6 +122,7 @@ impl fmt::Display for ApiError {
         match self {
             Self::Auth(error) => write!(formatter, "{error}"),
             Self::Leaderboard(error) => write!(formatter, "{error}"),
+            Self::League(error) => write!(formatter, "{error}"),
             Self::Live(error) => write!(formatter, "{error}"),
             Self::Profile(error) => write!(formatter, "{error}"),
             Self::Ranked(error) => write!(formatter, "{error}"),
@@ -148,6 +156,28 @@ impl IntoResponse for ApiError {
                 | LeaderboardError::InvalidCursor
                 | LeaderboardError::InvalidLimit,
             ) => StatusCode::BAD_REQUEST,
+            Self::League(LeagueError::NotFound) => StatusCode::NOT_FOUND,
+            Self::League(
+                LeagueError::RegistrationClosed
+                | LeagueError::LeagueFull
+                | LeagueError::AlreadyMember
+                | LeagueError::NotMember
+                | LeagueError::ScheduleUnavailable
+                | LeagueError::ScheduleConflict
+                | LeagueError::InvalidMembershipState,
+            ) => StatusCode::CONFLICT,
+            Self::League(
+                LeagueError::InvalidLeagueId
+                | LeagueError::InvalidWallet
+                | LeagueError::InvalidName
+                | LeagueError::InvalidLeague
+                | LeagueError::InvalidSchedule
+                | LeagueError::EmptySchedule
+                | LeagueError::DuplicateMarketRound
+                | LeagueError::DuplicateLeagueRound
+                | LeagueError::ScheduleOverlap
+                | LeagueError::ChainIdentityUnavailable,
+            ) => StatusCode::BAD_REQUEST,
             Self::Live(LiveError::NotFound) => StatusCode::NOT_FOUND,
             Self::Live(LiveError::InvalidBattle) => StatusCode::BAD_REQUEST,
             Self::Ranked(RankedError::RoundNotFound | RankedError::QueueNotFound) => {
@@ -171,6 +201,7 @@ impl IntoResponse for ApiError {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
             Self::Leaderboard(LeaderboardError::Storage(_)) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::League(LeagueError::Storage(_)) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Live(LiveError::Storage(_)) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Ranked(RankedError::Storage(_)) => StatusCode::INTERNAL_SERVER_ERROR,
         };
@@ -199,6 +230,12 @@ impl From<ProfileError> for ApiError {
 impl From<LeaderboardError> for ApiError {
     fn from(error: LeaderboardError) -> Self {
         Self::Leaderboard(error)
+    }
+}
+
+impl From<LeagueError> for ApiError {
+    fn from(error: LeagueError) -> Self {
+        Self::League(error)
     }
 }
 
@@ -242,6 +279,11 @@ struct RankedQueueRequest {
 #[derive(Debug, Deserialize, Default)]
 struct RankedStatusQuery {
     market_round_id: Option<i64>,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct LeagueListQuery {
+    status: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -361,6 +403,51 @@ async fn get_next_market_round(
     ))
 }
 
+async fn list_leagues(
+    State(state): State<ApiState>,
+    Query(query): Query<LeagueListQuery>,
+) -> Result<Json<Vec<league::LeagueSummary>>, ApiError> {
+    Ok(Json(
+        league::list_leagues(&state.pool, query.status.as_deref()).await?,
+    ))
+}
+
+async fn get_league(
+    State(state): State<ApiState>,
+    Path(league_id): Path<i64>,
+) -> Result<Json<league::LeagueDetails>, ApiError> {
+    Ok(Json(league::get_league(&state.pool, league_id).await?))
+}
+
+async fn join_league(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(league_id): Path<i64>,
+) -> Result<Json<league::JoinLeagueResponse>, ApiError> {
+    let wallet = authenticated_wallet(&state, &headers).await?;
+    Ok(Json(
+        league::request_join(&state.pool, league_id, &wallet, auth::unix_now()).await?,
+    ))
+}
+
+async fn leave_league(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(league_id): Path<i64>,
+) -> Result<Json<league::LeaveLeagueResponse>, ApiError> {
+    let wallet = authenticated_wallet(&state, &headers).await?;
+    Ok(Json(
+        league::request_leave(&state.pool, league_id, &wallet, auth::unix_now()).await?,
+    ))
+}
+
+async fn get_league_rounds(
+    State(state): State<ApiState>,
+    Path(league_id): Path<i64>,
+) -> Result<Json<Vec<league::LeagueRound>>, ApiError> {
+    Ok(Json(league::list_rounds(&state.pool, league_id).await?))
+}
+
 async fn join_ranked_queue(
     State(state): State<ApiState>,
     headers: HeaderMap,
@@ -472,6 +559,25 @@ fn error_code(error: &ApiError) -> &'static str {
         ApiError::Leaderboard(LeaderboardError::InvalidWallet) => "INVALID_WALLET",
         ApiError::Leaderboard(LeaderboardError::InvalidCursor) => "INVALID_CURSOR",
         ApiError::Leaderboard(LeaderboardError::InvalidLimit) => "INVALID_LIMIT",
+        ApiError::League(LeagueError::Storage(_)) => "INTERNAL_ERROR",
+        ApiError::League(LeagueError::InvalidLeagueId) => "INVALID_LEAGUE_ID",
+        ApiError::League(LeagueError::InvalidWallet) => "INVALID_WALLET",
+        ApiError::League(LeagueError::InvalidName) => "INVALID_LEAGUE_NAME",
+        ApiError::League(LeagueError::InvalidLeague) => "INVALID_LEAGUE",
+        ApiError::League(LeagueError::NotFound) => "LEAGUE_NOT_FOUND",
+        ApiError::League(LeagueError::RegistrationClosed) => "LEAGUE_REGISTRATION_CLOSED",
+        ApiError::League(LeagueError::LeagueFull) => "LEAGUE_FULL",
+        ApiError::League(LeagueError::AlreadyMember) => "ALREADY_LEAGUE_MEMBER",
+        ApiError::League(LeagueError::NotMember) => "NOT_LEAGUE_MEMBER",
+        ApiError::League(LeagueError::ScheduleUnavailable) => "LEAGUE_SCHEDULE_UNAVAILABLE",
+        ApiError::League(LeagueError::InvalidSchedule)
+        | ApiError::League(LeagueError::EmptySchedule)
+        | ApiError::League(LeagueError::DuplicateMarketRound)
+        | ApiError::League(LeagueError::DuplicateLeagueRound)
+        | ApiError::League(LeagueError::ScheduleOverlap) => "INVALID_LEAGUE_SCHEDULE",
+        ApiError::League(LeagueError::ScheduleConflict) => "LEAGUE_SCHEDULE_CONFLICT",
+        ApiError::League(LeagueError::ChainIdentityUnavailable) => "CHAIN_IDENTITY_UNAVAILABLE",
+        ApiError::League(LeagueError::InvalidMembershipState) => "INVALID_MEMBERSHIP_STATE",
         ApiError::Live(LiveError::InvalidBattle) => "INVALID_BATTLE",
         ApiError::Live(LiveError::NotFound) => "BATTLE_NOT_FOUND",
         ApiError::Live(LiveError::Storage(_)) => "INTERNAL_ERROR",

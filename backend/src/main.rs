@@ -27,6 +27,7 @@ pub mod auth;
 pub mod db;
 pub mod indexer;
 pub mod leaderboard;
+pub mod league;
 pub mod live;
 pub mod profile;
 pub mod proof;

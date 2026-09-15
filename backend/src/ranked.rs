@@ -865,9 +865,16 @@ async fn has_league_reservation(
 ) -> Result<bool, RankedError> {
     let row = sqlx::query(
         "SELECT EXISTS(
-             SELECT 1 FROM league_reservations
-             WHERE market_round_id = $1 AND wallet = $2
-               AND status NOT IN ('CANCELLED', 'RESOLVED')
+             SELECT 1
+             FROM league_reservations reservation
+             JOIN market_rounds reserved_round
+               ON reserved_round.id = reservation.market_round_id
+             JOIN market_rounds requested_round
+               ON requested_round.id = $1
+             WHERE reservation.wallet = $2
+               AND reservation.status NOT IN ('CANCELLED', 'EXPIRED', 'RESOLVED')
+               AND reserved_round.start_target_at < requested_round.end_target_at
+               AND requested_round.start_target_at < reserved_round.end_target_at
          ) AS exists",
     )
     .bind(market_round_id)

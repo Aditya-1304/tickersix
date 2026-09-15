@@ -1,12 +1,14 @@
 use market_data::{AttestorSigner, CanonicalPriceReport, PriceReportContext, SignedAttestorReport};
 use relay::{
-    build_create_rated_battle_instruction, build_finalize_battle_instruction,
-    build_finalize_forfeit_instruction, build_finalize_market_round_instruction,
-    build_finalize_price_phase_instruction, build_mark_price_phase_unavailable_instruction,
-    build_settle_side_score_instruction, build_signed_legacy_relay_transaction,
-    build_submit_price_attestation_plan, build_void_battle_price_unavailable_instruction,
-    build_void_battle_system_incident_instruction, CreateRatedBattleAccounts, FinalizeAccounts,
-    RelayAccounts, RelayError,
+    build_create_official_league_instruction, build_create_rated_battle_instruction,
+    build_finalize_battle_instruction, build_finalize_forfeit_instruction,
+    build_finalize_market_round_instruction, build_finalize_price_phase_instruction,
+    build_join_league_instruction, build_leave_league_instruction,
+    build_mark_price_phase_unavailable_instruction, build_settle_side_score_instruction,
+    build_signed_legacy_relay_transaction, build_submit_price_attestation_plan,
+    build_void_battle_price_unavailable_instruction, build_void_battle_system_incident_instruction,
+    league_member_pda, league_pda, CreateOfficialLeagueAccounts, CreateRatedBattleAccounts,
+    FinalizeAccounts, LeagueMembershipAccounts, RelayAccounts, RelayError,
 };
 use solana_address::Address;
 use solana_hash::Hash;
@@ -103,6 +105,54 @@ fn coordinator_battle_builder_preserves_ranked_account_authority_and_writability
     assert!(instruction.accounts[9].is_writable);
     assert!(instruction.accounts[10].is_writable);
     assert!(!instruction.data.is_empty());
+}
+
+#[test]
+fn official_league_builder_uses_the_canonical_league_pda_and_coordinator_signer() {
+    let league_id = 42;
+    let instruction = build_create_official_league_instruction(
+        league_id,
+        100,
+        5,
+        1,
+        1_800_000_000,
+        CreateOfficialLeagueAccounts {
+            config: [10; 32],
+            coordinator: [11; 32],
+            league: league_pda(league_id),
+        },
+    );
+
+    assert_eq!(instruction.accounts.len(), 4);
+    assert!(!instruction.accounts[0].is_writable);
+    assert!(instruction.accounts[1].is_signer && instruction.accounts[1].is_writable);
+    assert!(instruction.accounts[2].is_writable);
+    assert_eq!(
+        instruction.accounts[2].pubkey,
+        Address::from(league_pda(league_id))
+    );
+    assert!(!instruction.data.is_empty());
+}
+
+#[test]
+fn league_membership_builders_bind_the_wallet_to_the_canonical_member_pda() {
+    let accounts = LeagueMembershipAccounts {
+        config: [10; 32],
+        player: [11; 32],
+        league: [12; 32],
+        member: league_member_pda([12; 32], [11; 32]),
+    };
+    let join = build_join_league_instruction(accounts);
+    let leave = build_leave_league_instruction(accounts);
+
+    assert_eq!(join.accounts.len(), 5);
+    assert!(!join.accounts[0].is_writable);
+    assert!(join.accounts[1].is_signer && join.accounts[1].is_writable);
+    assert!(join.accounts[2].is_writable && join.accounts[3].is_writable);
+    assert_eq!(join.accounts[3].pubkey, Address::from(accounts.member));
+    assert_eq!(leave.accounts.len(), 4);
+    assert!(leave.accounts[1].is_signer && leave.accounts[1].is_writable);
+    assert_eq!(leave.accounts[3].pubkey, Address::from(accounts.member));
 }
 
 #[test]

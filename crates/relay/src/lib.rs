@@ -60,6 +60,27 @@ pub struct CreateRatedBattleAccounts {
     pub rated_slot_b: [u8; 32],
 }
 
+/// Accounts required by the coordinator to create one official rated League.
+/// The coordinator signer is supplied by the caller and is never persisted by
+/// this crate.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CreateOfficialLeagueAccounts {
+    pub config: [u8; 32],
+    pub coordinator: [u8; 32],
+    pub league: [u8; 32],
+}
+
+/// Accounts required to request or complete one League membership lifecycle
+/// transaction. The player signs both operations; the backend never receives
+/// or stores the player's private key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct LeagueMembershipAccounts {
+    pub config: [u8; 32],
+    pub player: [u8; 32],
+    pub league: [u8; 32],
+    pub member: [u8; 32],
+}
+
 /// The two instructions that must be adjacent in a relay transaction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PriceRelayPlan {
@@ -212,6 +233,102 @@ pub fn build_create_rated_battle_instruction(
         }
         .data(),
     }
+}
+
+/// Builds the coordinator instruction that creates the canonical on-chain
+/// official League account. Backend catalog data should be inserted or
+/// reconciled using the resulting League PDA only after this transaction is
+/// submitted and confirmed.
+pub fn build_create_official_league_instruction(
+    league_id: u64,
+    max_players: u16,
+    total_rounds: u16,
+    pairing_policy_version: u16,
+    registration_close_at: i64,
+    accounts: CreateOfficialLeagueAccounts,
+) -> Instruction {
+    Instruction {
+        program_id: address(tickersix::ID.to_bytes()),
+        accounts: vec![
+            readonly(address(accounts.config)),
+            signer_writable(address(accounts.coordinator)),
+            writable(address(accounts.league)),
+            readonly(address(system_program::ID.to_bytes())),
+        ],
+        data: tickersix::instruction::CreateOfficialLeague {
+            league_id,
+            max_players,
+            total_rounds,
+            pairing_policy_version,
+            registration_close_at,
+        }
+        .data(),
+    }
+}
+
+/// Builds the wallet-signed instruction that creates a LeagueMember PDA.
+/// PostgreSQL may track the request as pending, but membership becomes active
+/// only after a chain indexer confirms this instruction succeeded.
+pub fn build_join_league_instruction(accounts: LeagueMembershipAccounts) -> Instruction {
+    Instruction {
+        program_id: address(tickersix::ID.to_bytes()),
+        accounts: vec![
+            readonly(address(accounts.config)),
+            signer_writable(address(accounts.player)),
+            writable(address(accounts.league)),
+            writable(address(accounts.member)),
+            readonly(address(system_program::ID.to_bytes())),
+        ],
+        data: tickersix::instruction::JoinLeague {}.data(),
+    }
+}
+
+/// Builds the wallet-signed instruction that closes a LeagueMember PDA before
+/// registration closes. The backend keeps the reservation blocked until the
+/// chain indexer confirms this instruction and marks the membership as left.
+pub fn build_leave_league_instruction(accounts: LeagueMembershipAccounts) -> Instruction {
+    Instruction {
+        program_id: address(tickersix::ID.to_bytes()),
+        accounts: vec![
+            readonly(address(accounts.config)),
+            signer_writable(address(accounts.player)),
+            writable(address(accounts.league)),
+            writable(address(accounts.member)),
+        ],
+        data: tickersix::instruction::LeaveLeagueBeforeClose {}.data(),
+    }
+}
+
+/// Derives the canonical Config PDA used by all player-facing League
+/// membership instructions.
+pub fn config_pda() -> [u8; 32] {
+    AnchorPubkey::find_program_address(&[tickersix::CONFIG_SEED], &tickersix::ID)
+        .0
+        .to_bytes()
+}
+
+/// Derives the canonical League PDA for an on-chain league id.
+pub fn league_pda(league_id: u64) -> [u8; 32] {
+    AnchorPubkey::find_program_address(
+        &[tickersix::LEAGUE_SEED, &league_id.to_le_bytes()],
+        &tickersix::ID,
+    )
+    .0
+    .to_bytes()
+}
+
+/// Derives the canonical LeagueMember PDA for a League and wallet.
+pub fn league_member_pda(league: [u8; 32], player: [u8; 32]) -> [u8; 32] {
+    AnchorPubkey::find_program_address(
+        &[
+            tickersix::LEAGUE_MEMBER_SEED,
+            league.as_ref(),
+            player.as_ref(),
+        ],
+        &tickersix::ID,
+    )
+    .0
+    .to_bytes()
 }
 
 /// Derives the Battle and RatedSlot addresses used by the ranked coordinator

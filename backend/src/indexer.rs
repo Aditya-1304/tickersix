@@ -8,9 +8,13 @@ use std::fmt;
 
 use sqlx::{PgPool, Row};
 
+use crate::league;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IndexerError {
     InvalidRound,
+    InvalidLeagueMember,
+    LeagueMembershipConflict,
     ExposureConflict,
     Storage(String),
 }
@@ -19,6 +23,12 @@ impl fmt::Display for IndexerError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::InvalidRound => "indexed Market Round has invalid timing",
+            Self::InvalidLeagueMember => {
+                "indexed LeagueMember does not match the canonical League and wallet"
+            }
+            Self::LeagueMembershipConflict => {
+                "indexed LeagueMember conflicts with the pending membership lifecycle"
+            }
             Self::ExposureConflict => "wallet already has a different rated exposure in the round",
             Self::Storage(_) => "indexer storage operation failed",
         })
@@ -50,6 +60,30 @@ pub struct IndexedBattle {
     pub state: String,
     pub result: Option<String>,
     pub indexed_at: i64,
+}
+
+/// Decoded on-chain LeagueMember state supplied by a chain reader.
+///
+/// `league_id` is the backend projection id; `league_chain_pubkey` and
+/// `member_pubkey` are the authoritative Solana identities used for PDA
+/// validation before any membership state is promoted.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexedLeagueMember {
+    pub league_id: i64,
+    pub league_chain_pubkey: String,
+    pub member_pubkey: String,
+    pub wallet: String,
+    pub active: bool,
+    pub indexed_at: i64,
+}
+
+pub fn validate_league_member(member: &IndexedLeagueMember) -> Result<(), IndexerError> {
+    let expected = league::expected_member_pubkey(&member.league_chain_pubkey, &member.wallet)
+        .map_err(|_| IndexerError::InvalidLeagueMember)?;
+    if member.league_id <= 0 || expected != member.member_pubkey {
+        return Err(IndexerError::InvalidLeagueMember);
+    }
+    Ok(())
 }
 
 pub fn validate_market_round(round: &IndexedMarketRound) -> Result<(), IndexerError> {
@@ -143,6 +177,36 @@ pub async fn upsert_battle(pool: &PgPool, battle: &IndexedBattle) -> Result<(), 
     Ok(())
 }
 
+/// Applies an indexed membership transition only after the wallet lifecycle
+/// has produced the matching pending intent. Replaying the same chain update
+/// is safe because the League module performs the state transition inside a
+/// wallet-locked transaction.
+pub async fn upsert_league_member(
+    pool: &PgPool,
+    member: &IndexedLeagueMember,
+) -> Result<(), IndexerError> {
+    validate_league_member(member)?;
+    let result = if member.active {
+        league::confirm_join(
+            pool,
+            member.league_id,
+            &member.wallet,
+            &member.member_pubkey,
+            member.indexed_at,
+        )
+        .await
+    } else {
+        league::confirm_leave(pool, member.league_id, &member.wallet, member.indexed_at).await
+    };
+    result.map(|_| ()).map_err(|error| match error {
+        league::LeagueError::Storage(message) => IndexerError::Storage(message),
+        league::LeagueError::InvalidWallet
+        | league::LeagueError::ChainIdentityUnavailable
+        | league::LeagueError::InvalidLeagueId => IndexerError::InvalidLeagueMember,
+        _ => IndexerError::LeagueMembershipConflict,
+    })
+}
+
 pub async fn upsert_rated_exposure(
     pool: &PgPool,
     market_round_id: i64,
@@ -232,5 +296,22 @@ mod tests {
             Err(IndexerError::InvalidRound)
         );
         assert!(validate_market_round(&round()).is_ok());
+    }
+
+    #[test]
+    fn indexer_rejects_a_member_pda_bound_to_another_wallet() {
+        let member = IndexedLeagueMember {
+            league_id: 7,
+            league_chain_pubkey: bs58::encode([12; 32]).into_string(),
+            member_pubkey: bs58::encode([99; 32]).into_string(),
+            wallet: bs58::encode([11; 32]).into_string(),
+            active: true,
+            indexed_at: 1,
+        };
+
+        assert_eq!(
+            validate_league_member(&member),
+            Err(IndexerError::InvalidLeagueMember)
+        );
     }
 }
