@@ -19,6 +19,7 @@ use market_data::{
     Phase0Observation, PriceBatch,
 };
 use serde::{Deserialize, Serialize};
+use sqlx::postgres::PgPoolOptions;
 
 pub mod api;
 pub mod attestor;
@@ -27,6 +28,7 @@ pub mod db;
 pub mod indexer;
 pub mod profile;
 pub mod proof;
+pub mod ranked;
 pub mod recovery;
 pub mod settlement;
 
@@ -72,6 +74,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Some("phase0-analyze") => analyze_phase0()?,
         Some("attestor-run") => attestor::run().await?,
         Some("api-serve") => api::serve_from_env().await?,
+        Some("ranked-match") => run_ranked_match().await?,
         Some("proof-serve") => {
             let path = env::args()
                 .nth(2)
@@ -104,6 +107,23 @@ async fn record_phase0_metadata() -> Result<(), Box<dyn Error>> {
     let client = JupiterClient::with_base_url(base_url, api_key)?;
     let batch = client.fetch_token_information(&mints).await?;
     println!("{}", serde_json::to_string_pretty(&batch)?);
+    Ok(())
+}
+
+async fn run_ranked_match() -> Result<(), Box<dyn Error>> {
+    let market_round_id = env::args()
+        .nth(2)
+        .ok_or("usage: cargo run -p backend -- ranked-match <market_round_id>")?
+        .parse::<i64>()?;
+    let database_url = env::var("TICKERSIX_DATABASE_URL")
+        .map_err(|_| "TICKERSIX_DATABASE_URL must point to PostgreSQL")?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&database_url)
+        .await?;
+    db::run_migrations(&pool).await?;
+    let result = ranked::run_matchmaker(&pool, market_round_id, auth::unix_now()).await?;
+    println!("{}", serde_json::to_string_pretty(&result)?);
     Ok(())
 }
 
@@ -357,6 +377,7 @@ TICKERSIX_PHASE0_ITERATIONS, TICKERSIX_PHASE0_SAMPLE_INTERVAL_SECS
 Analysis: cargo run -p backend -- phase0-analyze phase0/attestor-0.ndjson
 Phase 2 attestor: TICKERSIX_ATTESTOR_CONFIG=attestor.json cargo run -p backend -- attestor-run
 Phase 3.1 API: TICKERSIX_DATABASE_URL=postgres://... cargo run -p backend -- api-serve
+Phase 3.2 matcher: TICKERSIX_DATABASE_URL=postgres://... cargo run -p backend -- ranked-match <market_round_id>
 Settlement planner: cargo run -p backend -- settlement-plan settlement.json
 Proof endpoint: cargo run -p backend -- proof-serve proof.json [bind]"#
     );

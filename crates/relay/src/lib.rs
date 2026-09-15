@@ -45,6 +45,21 @@ pub struct FinalizeAccounts {
     pub finalizer: [u8; 32],
 }
 
+/// Accounts required by the coordinator to admit one official Ranked Battle.
+/// The coordinator signer is supplied by the caller; this crate never stores
+/// or selects a coordinator private key.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CreateRatedBattleAccounts {
+    pub config: [u8; 32],
+    pub coordinator: [u8; 32],
+    pub market_round: [u8; 32],
+    pub player_a: [u8; 32],
+    pub player_b: [u8; 32],
+    pub battle: [u8; 32],
+    pub rated_slot_a: [u8; 32],
+    pub rated_slot_b: [u8; 32],
+}
+
 /// The two instructions that must be adjacent in a relay transaction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PriceRelayPlan {
@@ -155,6 +170,94 @@ pub fn build_submit_price_attestation_plan(
         submission,
         price_attestation: price_attestation.to_bytes(),
     })
+}
+
+/// Builds the exact Anchor instruction used by the coordinator to create one
+/// Ranked Battle and both RatedSlot PDAs atomically. The program remains the
+/// final authority: it checks the frozen round, coordinator signer, player
+/// identities, replay flag, and whether either RatedSlot already exists.
+pub fn build_create_rated_battle_instruction(
+    battle_id: u64,
+    rating_a_before: i32,
+    rating_b_before: i32,
+    rating_formula_version: u16,
+    accounts: CreateRatedBattleAccounts,
+) -> Instruction {
+    Instruction {
+        program_id: address(tickersix::ID.to_bytes()),
+        accounts: vec![
+            readonly(address(accounts.config)),
+            signer_writable(address(accounts.coordinator)),
+            writable(address(accounts.market_round)),
+            readonly(address(accounts.player_a)),
+            readonly(address(accounts.player_b)),
+            // Anchor uses the program id as the explicit `None` marker for
+            // each optional League account when required accounts follow.
+            readonly(address(tickersix::ID.to_bytes())),
+            readonly(address(tickersix::ID.to_bytes())),
+            readonly(address(tickersix::ID.to_bytes())),
+            writable(address(accounts.battle)),
+            writable(address(accounts.rated_slot_a)),
+            writable(address(accounts.rated_slot_b)),
+            readonly(address(system_program::ID.to_bytes())),
+        ],
+        data: tickersix::instruction::CreateRatedBattle {
+            battle_id,
+            mode: tickersix::BattleMode::Ranked,
+            league: AnchorPubkey::default(),
+            league_round_no: 0,
+            rating_a_before,
+            rating_b_before,
+            rating_formula_version,
+        }
+        .data(),
+    }
+}
+
+/// Derives the Battle and RatedSlot addresses used by the ranked coordinator
+/// transaction. Keeping PDA derivation beside instruction construction avoids
+/// backend/client disagreement about seed order or integer encoding.
+pub fn create_rated_battle_pdas(
+    market_round: [u8; 32],
+    battle_id: u64,
+    player_a: [u8; 32],
+    player_b: [u8; 32],
+) -> ([u8; 32], [u8; 32], [u8; 32]) {
+    let market_round = AnchorPubkey::new_from_array(market_round);
+    let player_a = AnchorPubkey::new_from_array(player_a);
+    let player_b = AnchorPubkey::new_from_array(player_b);
+    let battle = AnchorPubkey::find_program_address(
+        &[
+            tickersix::BATTLE_SEED,
+            market_round.as_ref(),
+            &battle_id.to_le_bytes(),
+        ],
+        &tickersix::ID,
+    )
+    .0;
+    let rated_slot_a = AnchorPubkey::find_program_address(
+        &[
+            tickersix::RATED_SLOT_SEED,
+            market_round.as_ref(),
+            player_a.as_ref(),
+        ],
+        &tickersix::ID,
+    )
+    .0;
+    let rated_slot_b = AnchorPubkey::find_program_address(
+        &[
+            tickersix::RATED_SLOT_SEED,
+            market_round.as_ref(),
+            player_b.as_ref(),
+        ],
+        &tickersix::ID,
+    )
+    .0;
+    (
+        battle.to_bytes(),
+        rated_slot_a.to_bytes(),
+        rated_slot_b.to_bytes(),
+    )
 }
 
 /// Builds the permissionless finalization instruction for two or three signed
@@ -539,4 +642,8 @@ fn writable(address: Address) -> AccountMeta {
 
 fn signer(address: Address) -> AccountMeta {
     AccountMeta::new_readonly(address, true)
+}
+
+fn signer_writable(address: Address) -> AccountMeta {
+    AccountMeta::new(address, true)
 }

@@ -1,4 +1,6 @@
-use protocol::{apply_elo_update, pair_swiss, EloOutcome, PairingPlayer};
+use protocol::{
+    apply_elo_update, pair_ranked, pair_swiss, EloOutcome, PairingPlayer, RankedPlayer,
+};
 
 fn player(id: u8, league_points: u32, rating: i32, byes: u16, opponents: &[u8]) -> PairingPlayer {
     PairingPlayer {
@@ -77,4 +79,63 @@ fn elo_uses_the_player_specific_k_factor_and_rating_floor() {
     assert_eq!(placement_win.k_factor, 64);
     assert_eq!(placement_win.rating_after, 1532);
     assert_eq!(placement_win.actual_score, 1.0);
+}
+
+#[test]
+fn ranked_pairing_prefers_nearest_rating_and_avoids_a_recent_rematch() {
+    let players = vec![
+        RankedPlayer {
+            wallet: [1; 32],
+            rating: 1500,
+            recent_opponents: vec![[2; 32]],
+        },
+        RankedPlayer {
+            wallet: [2; 32],
+            rating: 1501,
+            recent_opponents: vec![[1; 32]],
+        },
+        RankedPlayer {
+            wallet: [3; 32],
+            rating: 1502,
+            recent_opponents: vec![],
+        },
+        RankedPlayer {
+            wallet: [4; 32],
+            rating: 1503,
+            recent_opponents: vec![],
+        },
+    ];
+
+    let result = pair_ranked(&players);
+
+    assert_eq!(result.unmatched, None);
+    assert_eq!(result.pairs, vec![(0, 2), (1, 3)]);
+}
+
+#[test]
+fn ranked_pairing_is_deterministic_and_leaves_odd_player_unmatched() {
+    let players = vec![
+        RankedPlayer {
+            wallet: [9; 32],
+            rating: 1700,
+            recent_opponents: vec![],
+        },
+        RankedPlayer {
+            wallet: [8; 32],
+            rating: 1500,
+            recent_opponents: vec![],
+        },
+        RankedPlayer {
+            wallet: [7; 32],
+            rating: 1501,
+            recent_opponents: vec![],
+        },
+    ];
+
+    let first = pair_ranked(&players);
+    let second = pair_ranked(&players);
+
+    assert_eq!(first, second);
+    assert_eq!(first.pairs, vec![(2, 1)]);
+    assert_eq!(first.unmatched, Some(0));
 }

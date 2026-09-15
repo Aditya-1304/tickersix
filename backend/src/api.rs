@@ -7,7 +7,7 @@
 use std::{env, error::Error, fmt, sync::Arc};
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post, put},
@@ -21,6 +21,7 @@ use crate::{
     auth::{self, AuthError},
     db,
     profile::{self, ProfileError, ProfileUpdate},
+    ranked::{self, RankedError},
 };
 
 #[derive(Clone)]
@@ -49,6 +50,12 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/profiles/:wallet", get(get_profile))
         .route("/v1/profiles/:wallet/history", get(get_profile_history))
         .route("/v1/profile/me", put(update_my_profile))
+        .route("/v1/market-rounds/next", get(get_next_market_round))
+        .route(
+            "/v1/ranked/queue",
+            post(join_ranked_queue).delete(leave_ranked_queue),
+        )
+        .route("/v1/ranked/status", get(get_ranked_status))
         .with_state(state)
 }
 
@@ -89,6 +96,7 @@ struct ErrorBody {
 pub enum ApiError {
     Auth(AuthError),
     Profile(ProfileError),
+    Ranked(RankedError),
     DomainMismatch,
 }
 
@@ -97,6 +105,7 @@ impl fmt::Display for ApiError {
         match self {
             Self::Auth(error) => write!(formatter, "{error}"),
             Self::Profile(error) => write!(formatter, "{error}"),
+            Self::Ranked(error) => write!(formatter, "{error}"),
             Self::DomainMismatch => {
                 formatter.write_str("authentication domain does not match server configuration")
             }
@@ -119,9 +128,27 @@ impl IntoResponse for ApiError {
             | Self::Profile(ProfileError::InvalidDisplayName)
             | Self::Profile(ProfileError::InvalidAvatarUrl) => StatusCode::BAD_REQUEST,
             Self::Profile(ProfileError::NotFound) => StatusCode::NOT_FOUND,
+            Self::Ranked(RankedError::RoundNotFound | RankedError::QueueNotFound) => {
+                StatusCode::NOT_FOUND
+            }
+            Self::Ranked(
+                RankedError::QueueClosed
+                | RankedError::AlreadyPaired
+                | RankedError::AlreadyExposed
+                | RankedError::LeagueReserved
+                | RankedError::UnresolvedPreviousBattle
+                | RankedError::CoordinatorConflict,
+            ) => StatusCode::CONFLICT,
+            Self::Ranked(
+                RankedError::InvalidWallet
+                | RankedError::InvalidRound
+                | RankedError::RoundNotEligible
+                | RankedError::CoordinatorPlanUnavailable,
+            ) => StatusCode::BAD_REQUEST,
             Self::Auth(AuthError::Storage(_)) | Self::Profile(ProfileError::Storage(_)) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
+            Self::Ranked(RankedError::Storage(_)) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         (
             status,
@@ -145,6 +172,12 @@ impl From<ProfileError> for ApiError {
     }
 }
 
+impl From<RankedError> for ApiError {
+    fn from(error: RankedError) -> Self {
+        Self::Ranked(error)
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct ChallengeRequest {
     wallet: String,
@@ -163,6 +196,16 @@ struct VerifyRequest {
 struct VerifyResponse {
     wallet: String,
     expires_at: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct RankedQueueRequest {
+    market_round_id: i64,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct RankedStatusQuery {
+    market_round_id: Option<i64>,
 }
 
 async fn health() -> Json<serde_json::Value> {
@@ -268,6 +311,59 @@ async fn update_my_profile(
     Ok(Json(profile::get_profile(&state.pool, &wallet).await?))
 }
 
+async fn get_next_market_round(
+    State(state): State<ApiState>,
+) -> Result<Json<Option<ranked::NextMarketRound>>, ApiError> {
+    Ok(Json(
+        ranked::next_market_round(&state.pool, auth::unix_now()).await?,
+    ))
+}
+
+async fn join_ranked_queue(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(request): Json<RankedQueueRequest>,
+) -> Result<Json<ranked::QueueEntry>, ApiError> {
+    let wallet = authenticated_wallet(&state, &headers).await?;
+    Ok(Json(
+        ranked::join_queue(
+            &state.pool,
+            &wallet,
+            request.market_round_id,
+            auth::unix_now(),
+        )
+        .await?,
+    ))
+}
+
+async fn leave_ranked_queue(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Query(query): Query<RankedStatusQuery>,
+) -> Result<StatusCode, ApiError> {
+    let wallet = authenticated_wallet(&state, &headers).await?;
+    let market_round_id = query.market_round_id.ok_or(RankedError::RoundNotFound)?;
+    ranked::leave_queue(&state.pool, &wallet, market_round_id, auth::unix_now()).await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+async fn get_ranked_status(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Query(query): Query<RankedStatusQuery>,
+) -> Result<Json<ranked::QueueEntry>, ApiError> {
+    let wallet = authenticated_wallet(&state, &headers).await?;
+    let market_round_id = query.market_round_id.ok_or(RankedError::RoundNotFound)?;
+    Ok(Json(
+        ranked::queue_status(&state.pool, &wallet, market_round_id).await?,
+    ))
+}
+
+async fn authenticated_wallet(state: &ApiState, headers: &HeaderMap) -> Result<String, ApiError> {
+    let token = session_from_headers(headers).ok_or(AuthError::SessionExpired)?;
+    Ok(auth::authenticated_wallet(&state.pool, token, auth::unix_now()).await?)
+}
+
 fn session_from_headers(headers: &HeaderMap) -> Option<&str> {
     headers
         .get(header::COOKIE)
@@ -291,6 +387,19 @@ fn error_code(error: &ApiError) -> &'static str {
         ApiError::Auth(AuthError::Storage(_)) | ApiError::Profile(ProfileError::Storage(_)) => {
             "INTERNAL_ERROR"
         }
+        ApiError::Ranked(RankedError::Storage(_)) => "INTERNAL_ERROR",
+        ApiError::Ranked(RankedError::RoundNotFound) => "ROUND_NOT_FOUND",
+        ApiError::Ranked(RankedError::QueueNotFound) => "QUEUE_NOT_FOUND",
+        ApiError::Ranked(RankedError::InvalidWallet) => "INVALID_WALLET",
+        ApiError::Ranked(RankedError::InvalidRound) => "INVALID_ROUND",
+        ApiError::Ranked(RankedError::RoundNotEligible) => "ROUND_NOT_ELIGIBLE",
+        ApiError::Ranked(RankedError::QueueClosed) => "QUEUE_CLOSED",
+        ApiError::Ranked(RankedError::AlreadyPaired) => "ALREADY_PAIRED",
+        ApiError::Ranked(RankedError::AlreadyExposed) => "ALREADY_EXPOSED",
+        ApiError::Ranked(RankedError::LeagueReserved) => "LEAGUE_RESERVED",
+        ApiError::Ranked(RankedError::UnresolvedPreviousBattle) => "UNRESOLVED_PREVIOUS_BATTLE",
+        ApiError::Ranked(RankedError::CoordinatorPlanUnavailable) => "COORDINATOR_PLAN_UNAVAILABLE",
+        ApiError::Ranked(RankedError::CoordinatorConflict) => "COORDINATOR_CONFLICT",
     }
 }
 

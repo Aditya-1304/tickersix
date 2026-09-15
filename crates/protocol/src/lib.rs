@@ -435,6 +435,76 @@ pub struct PairingResult {
     pub bye: Option<usize>,
 }
 
+/// Inputs for the V2 Ranked nearest-rating matcher.
+///
+/// Ranked pairing has no League score or bye. The backend removes players
+/// with chain/database blockers before calling this function, while this
+/// pure layer handles deterministic rating distance and recent-rematch
+/// avoidance.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RankedPlayer {
+    pub wallet: [u8; 32],
+    pub rating: i32,
+    pub recent_opponents: Vec<[u8; 32]>,
+}
+
+/// Deterministic V2 Ranked output. An odd final player remains unmatched and
+/// must stay queued or receive an explicit backend status; Ranked never gives
+/// a League-style bye.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RankedPairingResult {
+    pub pairs: Vec<(usize, usize)>,
+    pub unmatched: Option<usize>,
+}
+
+/// Pairs players greedily by nearest rating while treating a recent rematch
+/// as a larger penalty than any rating gap. This is the documented V2 policy:
+/// deterministic, explainable, and deliberately simpler than global minimum-
+/// weight matching. If avoiding every rematch would leave a player without a
+/// legal candidate, the matcher permits the least-cost rematch.
+pub fn pair_ranked(players: &[RankedPlayer]) -> RankedPairingResult {
+    let mut remaining: Vec<usize> = (0..players.len()).collect();
+    let mut pairs = Vec::with_capacity(players.len() / 2);
+
+    while remaining.len() >= 2 {
+        let first_position = remaining
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, index)| (players[**index].rating, players[**index].wallet))
+            .map(|(position, _)| position)
+            .expect("remaining contains at least two players");
+        let first = remaining.remove(first_position);
+
+        let candidate_position = remaining
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, candidate)| {
+                (
+                    players[first]
+                        .recent_opponents
+                        .contains(&players[**candidate].wallet),
+                    (i64::from(players[first].rating) - i64::from(players[**candidate].rating))
+                        .unsigned_abs(),
+                    players[**candidate].rating,
+                    players[**candidate].wallet,
+                )
+            })
+            .map(|(position, _)| position)
+            .expect("remaining contains a candidate");
+        let second = remaining.remove(candidate_position);
+        pairs.push(if players[first].wallet <= players[second].wallet {
+            (first, second)
+        } else {
+            (second, first)
+        });
+    }
+
+    RankedPairingResult {
+        pairs,
+        unmatched: remaining.first().copied(),
+    }
+}
+
 /// Pairs a League round while preferring score proximity and avoiding repeats.
 ///
 /// The search first requires non-repeat pairings. It only permits a repeat if

@@ -748,9 +748,11 @@ dependencies = [
  "market-data",
  "protocol",
  "rand 0.8.8",
+ "relay",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "solana-instruction 3.5.1",
  "sqlx",
  "tokio",
 ]

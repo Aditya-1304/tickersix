@@ -1,11 +1,12 @@
 use market_data::{AttestorSigner, CanonicalPriceReport, PriceReportContext, SignedAttestorReport};
 use relay::{
-    build_finalize_battle_instruction, build_finalize_forfeit_instruction,
-    build_finalize_market_round_instruction, build_finalize_price_phase_instruction,
-    build_mark_price_phase_unavailable_instruction, build_settle_side_score_instruction,
-    build_signed_legacy_relay_transaction, build_submit_price_attestation_plan,
-    build_void_battle_price_unavailable_instruction, build_void_battle_system_incident_instruction,
-    FinalizeAccounts, RelayAccounts, RelayError,
+    build_create_rated_battle_instruction, build_finalize_battle_instruction,
+    build_finalize_forfeit_instruction, build_finalize_market_round_instruction,
+    build_finalize_price_phase_instruction, build_mark_price_phase_unavailable_instruction,
+    build_settle_side_score_instruction, build_signed_legacy_relay_transaction,
+    build_submit_price_attestation_plan, build_void_battle_price_unavailable_instruction,
+    build_void_battle_system_incident_instruction, CreateRatedBattleAccounts, FinalizeAccounts,
+    RelayAccounts, RelayError,
 };
 use solana_address::Address;
 use solana_hash::Hash;
@@ -55,6 +56,53 @@ fn accounts() -> RelayAccounts {
         attestor_set: [12; 32],
         relayer: [13; 32],
     }
+}
+
+#[test]
+fn coordinator_battle_builder_preserves_ranked_account_authority_and_writability() {
+    let instruction = build_create_rated_battle_instruction(
+        7,
+        1500,
+        1510,
+        1,
+        CreateRatedBattleAccounts {
+            config: [10; 32],
+            coordinator: [11; 32],
+            market_round: [12; 32],
+            player_a: [13; 32],
+            player_b: [14; 32],
+            battle: [15; 32],
+            rated_slot_a: [16; 32],
+            rated_slot_b: [17; 32],
+        },
+    );
+
+    assert_eq!(
+        instruction.program_id,
+        Address::from(tickersix::ID.to_bytes())
+    );
+    assert_eq!(instruction.accounts.len(), 12);
+    assert!(instruction.accounts[1].is_signer);
+    assert!(instruction.accounts[1].is_writable);
+    assert!(instruction.accounts[2].is_writable);
+    assert!(!instruction.accounts[3].is_writable);
+    assert!(!instruction.accounts[4].is_writable);
+    assert_eq!(
+        instruction.accounts[5].pubkey,
+        Address::from(tickersix::ID.to_bytes())
+    );
+    assert_eq!(
+        instruction.accounts[6].pubkey,
+        Address::from(tickersix::ID.to_bytes())
+    );
+    assert_eq!(
+        instruction.accounts[7].pubkey,
+        Address::from(tickersix::ID.to_bytes())
+    );
+    assert!(instruction.accounts[8].is_writable);
+    assert!(instruction.accounts[9].is_writable);
+    assert!(instruction.accounts[10].is_writable);
+    assert!(!instruction.data.is_empty());
 }
 
 #[test]
