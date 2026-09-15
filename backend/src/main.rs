@@ -35,6 +35,7 @@ pub mod ranked;
 pub mod rating;
 pub mod recovery;
 pub mod settlement;
+pub mod standings;
 
 const DEFAULT_ITERATIONS: usize = 1;
 const DEFAULT_SAMPLE_INTERVAL_SECS: u64 = 5;

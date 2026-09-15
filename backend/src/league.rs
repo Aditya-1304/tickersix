@@ -20,10 +20,14 @@ use relay::{
     LeagueMembershipAccounts, LeagueRatedBattleAccounts,
 };
 use serde::Serialize;
+use sha2::{Digest, Sha256};
 use solana_instruction::Instruction;
 use sqlx::{postgres::PgRow, PgPool, Postgres, Row, Transaction};
 
 use crate::auth::parse_wallet;
+use crate::standings::{
+    calculate_standings, LeagueBattleFact, LeagueBattleResult, LeagueByeFact, LeagueStanding,
+};
 
 pub const MAX_LEAGUE_PLAYERS: i32 = 100;
 pub const PENDING_JOIN_TTL_SECS: i64 = 15 * 60;
@@ -92,6 +96,7 @@ pub enum LeagueError {
     PairingConflict,
     CoordinatorPlanUnavailable,
     CoordinatorConflict,
+    InvalidStandings,
     Storage(String),
 }
 
@@ -123,6 +128,7 @@ impl fmt::Display for LeagueError {
             Self::PairingConflict => "League pairing conflicts with existing state",
             Self::CoordinatorPlanUnavailable => "League coordinator Battle plan is unavailable",
             Self::CoordinatorConflict => "League coordinator Battle confirmation conflicts",
+            Self::InvalidStandings => "finalized League Battle data cannot produce standings",
             Self::Storage(_) => "League storage operation failed",
         })
     }
@@ -227,6 +233,33 @@ pub struct LeaguePairingRun {
     pub seed_source_blockhash: String,
     pub bye_wallet: Option<String>,
     pub pairings: Vec<LeaguePairingView>,
+}
+
+/// Public projection of one deterministic League ranking. Wallets remain
+/// strings at the HTTP boundary while the standings engine uses fixed-width
+/// public-key bytes for canonical ordering and arithmetic.
+#[derive(Debug, Clone, Serialize)]
+pub struct LeagueStandingView {
+    pub rank: u32,
+    pub wallet: String,
+    pub league_points: u32,
+    pub wins: u32,
+    pub draws: u32,
+    pub losses: u32,
+    pub byes: u32,
+    pub buchholz_sos: u32,
+    pub head_to_head_points: u32,
+    pub cumulative_margin_q9: i64,
+}
+
+/// Standings response with enough progress metadata for clients to avoid
+/// presenting a partial table as the final League result.
+#[derive(Debug, Clone, Serialize)]
+pub struct LeagueStandings {
+    pub league: LeagueSummary,
+    pub standings: Vec<LeagueStandingView>,
+    pub resolved_rounds: u32,
+    pub complete: bool,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -409,6 +442,149 @@ pub async fn get_league(pool: &PgPool, league_id: i64) -> Result<LeagueDetails, 
     let league = load_league_summary(pool, league_id).await?;
     let rounds = list_rounds(pool, league_id).await?;
     Ok(LeagueDetails { league, rounds })
+}
+
+/// Rebuilds the public League table exclusively from active memberships and
+/// terminal indexed Battle accounts. The query joins through the immutable
+/// pairing record, so an unrelated Battle projection cannot affect League
+/// points, SOS, head-to-head, or score-margin tie-breakers.
+pub async fn get_league_standings(
+    pool: &PgPool,
+    league_id: i64,
+) -> Result<LeagueStandings, LeagueError> {
+    validate_league_id(league_id)?;
+    let league = load_league_summary(pool, league_id).await?;
+
+    let member_rows = sqlx::query(
+        "SELECT wallet
+         FROM league_memberships
+         WHERE league_id = $1
+           AND membership_state = 'ACTIVE'
+           AND active = TRUE
+         ORDER BY wallet ASC",
+    )
+    .bind(league_id)
+    .fetch_all(pool)
+    .await
+    .map_err(storage_error)?;
+    let members = member_rows
+        .iter()
+        .map(|row| {
+            let wallet: String = row.try_get("wallet").map_err(storage_error)?;
+            parse_player_pubkey(&wallet).map_err(|_| LeagueError::InvalidStandings)
+        })
+        .collect::<Result<Vec<_>, LeagueError>>()?;
+
+    let battle_rows = sqlx::query(
+        "SELECT p.league_round_no, p.player_a, p.player_b,
+                b.result, b.score_a_q9, b.score_b_q9
+         FROM league_pairings p
+         JOIN battles b ON b.chain_pubkey = p.battle_pubkey
+         WHERE p.league_id = $1
+           AND p.status = 'CREATED'
+           AND b.state IN ('FINALIZED', 'SETTLED', 'VOIDED')
+           AND b.result IS NOT NULL
+         ORDER BY p.league_round_no ASC, p.id ASC",
+    )
+    .bind(league_id)
+    .fetch_all(pool)
+    .await
+    .map_err(storage_error)?;
+    let battles = battle_rows
+        .iter()
+        .map(|row| {
+            let result: String = row.try_get("result").map_err(storage_error)?;
+            Ok(LeagueBattleFact {
+                round_no: row.try_get("league_round_no").map_err(storage_error)?,
+                player_a: parse_standings_wallet(row, "player_a")?,
+                player_b: parse_standings_wallet(row, "player_b")?,
+                result: parse_standings_result(&result).ok_or(LeagueError::InvalidStandings)?,
+                score_a_q9: row.try_get("score_a_q9").map_err(storage_error)?,
+                score_b_q9: row.try_get("score_b_q9").map_err(storage_error)?,
+            })
+        })
+        .collect::<Result<Vec<_>, LeagueError>>()?;
+
+    // A bye contributes only after the complete pairing run is resolvable.
+    // This prevents a currently scheduled bye from appearing as earned points
+    // while the same round's opponent Battles are still in progress.
+    let bye_rows = sqlx::query(
+        "SELECT r.league_round_no, r.bye_wallet
+         FROM league_pairing_runs r
+         WHERE r.league_id = $1
+           AND r.bye_wallet IS NOT NULL
+           AND r.status = 'COMPLETE'
+           AND NOT EXISTS (
+               SELECT 1
+               FROM league_pairings p
+               LEFT JOIN battles b ON b.chain_pubkey = p.battle_pubkey
+               WHERE p.run_id = r.id
+                 AND (
+                     p.status <> 'CREATED'
+                     OR b.chain_pubkey IS NULL
+                     OR b.state NOT IN ('FINALIZED', 'SETTLED', 'VOIDED')
+                     OR b.result IS NULL
+                 )
+           )
+         ORDER BY r.league_round_no ASC",
+    )
+    .bind(league_id)
+    .fetch_all(pool)
+    .await
+    .map_err(storage_error)?;
+    let byes = bye_rows
+        .iter()
+        .map(|row| {
+            Ok(LeagueByeFact {
+                round_no: row.try_get("league_round_no").map_err(storage_error)?,
+                wallet: parse_standings_wallet(row, "bye_wallet")?,
+            })
+        })
+        .collect::<Result<Vec<_>, LeagueError>>()?;
+
+    let latest_seed = sqlx::query(
+        "SELECT pairing_seed
+         FROM league_pairing_runs
+         WHERE league_id = $1
+         ORDER BY league_round_no DESC
+         LIMIT 1",
+    )
+    .bind(league_id)
+    .fetch_optional(pool)
+    .await
+    .map_err(storage_error)?
+    .map(|row| db_seed(&row))
+    .transpose()?
+    .unwrap_or([0; 32]);
+    let league_pubkey =
+        parse_chain_pubkey(&league.chain_pubkey).map_err(|_| LeagueError::InvalidStandings)?;
+    let final_seed = standings_final_seed(league_pubkey, latest_seed);
+
+    let resolved_round_set = battles
+        .iter()
+        .map(|battle| battle.round_no)
+        .chain(byes.iter().map(|bye| bye.round_no))
+        .collect::<HashSet<_>>();
+    let resolved_rounds =
+        u32::try_from(resolved_round_set.len()).map_err(|_| LeagueError::InvalidStandings)?;
+    let complete = (1..=league.total_rounds).all(|round| resolved_round_set.contains(&round));
+
+    let standings = if members.is_empty() {
+        Vec::new()
+    } else {
+        calculate_standings(&members, &battles, &byes, final_seed)
+            .map_err(|_| LeagueError::InvalidStandings)?
+            .into_iter()
+            .map(standing_view)
+            .collect()
+    };
+
+    Ok(LeagueStandings {
+        league,
+        standings,
+        resolved_rounds,
+        complete,
+    })
 }
 
 pub async fn list_rounds(pool: &PgPool, league_id: i64) -> Result<Vec<LeagueRound>, LeagueError> {
@@ -2170,6 +2346,47 @@ fn round_from_row(row: &PgRow) -> Result<LeagueRound, LeagueError> {
         start_target_at: row.try_get("start_target_at").map_err(storage_error)?,
         end_target_at: row.try_get("end_target_at").map_err(storage_error)?,
     })
+}
+
+fn parse_standings_wallet(row: &PgRow, column: &str) -> Result<[u8; 32], LeagueError> {
+    let wallet: String = row.try_get(column).map_err(storage_error)?;
+    parse_player_pubkey(&wallet).map_err(|_| LeagueError::InvalidStandings)
+}
+
+fn parse_standings_result(result: &str) -> Option<LeagueBattleResult> {
+    match result {
+        "PLAYER_A" => Some(LeagueBattleResult::PlayerA),
+        "PLAYER_B" => Some(LeagueBattleResult::PlayerB),
+        "DRAW" => Some(LeagueBattleResult::Draw),
+        "FORFEIT_A" => Some(LeagueBattleResult::ForfeitA),
+        "FORFEIT_B" => Some(LeagueBattleResult::ForfeitB),
+        "BOTH_FORFEIT" => Some(LeagueBattleResult::BothForfeit),
+        "VOIDED" => Some(LeagueBattleResult::Voided),
+        _ => None,
+    }
+}
+
+fn standings_final_seed(league_pubkey: [u8; 32], latest_pairing_seed: [u8; 32]) -> [u8; 32] {
+    let mut hasher = Sha256::new();
+    hasher.update(b"TICKERSIX_LEAGUE_STANDINGS_V1\0");
+    hasher.update(league_pubkey);
+    hasher.update(latest_pairing_seed);
+    hasher.finalize().into()
+}
+
+fn standing_view(standing: LeagueStanding) -> LeagueStandingView {
+    LeagueStandingView {
+        rank: standing.rank,
+        wallet: bs58::encode(standing.wallet).into_string(),
+        league_points: standing.league_points,
+        wins: standing.wins,
+        draws: standing.draws,
+        losses: standing.losses,
+        byes: standing.byes,
+        buchholz_sos: standing.buchholz_sos,
+        head_to_head_points: standing.head_to_head_points,
+        cumulative_margin_q9: standing.cumulative_margin_q9,
+    }
 }
 
 fn instruction_view(instruction: Instruction) -> InstructionView {

@@ -15,6 +15,7 @@ pub enum IndexerError {
     InvalidRound,
     InvalidLeague,
     InvalidLeagueMember,
+    InvalidBattle,
     LeagueMembershipConflict,
     ExposureConflict,
     Storage(String),
@@ -28,6 +29,7 @@ impl fmt::Display for IndexerError {
             Self::InvalidLeagueMember => {
                 "indexed LeagueMember does not match the canonical League and wallet"
             }
+            Self::InvalidBattle => "indexed Battle contains invalid terminal result or score data",
             Self::LeagueMembershipConflict => {
                 "indexed LeagueMember conflicts with the pending membership lifecycle"
             }
@@ -103,7 +105,64 @@ pub struct IndexedBattle {
     pub player_b: String,
     pub state: String,
     pub result: Option<String>,
+    pub score_a_q9: Option<i64>,
+    pub score_b_q9: Option<i64>,
     pub indexed_at: i64,
+}
+
+/// Validates the portion of a decoded Battle account that is required before
+/// it can enter the durable projection. Terminal played League Battles must
+/// carry both exact Q9 scores; forfeits and voids intentionally remain
+/// scoreless because they are not played-score events.
+pub fn validate_battle(battle: &IndexedBattle) -> Result<(), IndexerError> {
+    if battle.player_a == battle.player_b
+        || battle
+            .score_a_q9
+            .into_iter()
+            .chain(battle.score_b_q9)
+            .any(|score| score < 0)
+    {
+        return Err(IndexerError::InvalidBattle);
+    }
+
+    let terminal_league_battle = battle.mode == "LEAGUE"
+        && battle.rated
+        && matches!(battle.state.as_str(), "FINALIZED" | "SETTLED" | "VOIDED");
+    if terminal_league_battle
+        && !matches!(
+            battle.result.as_deref(),
+            Some("PLAYER_A")
+                | Some("PLAYER_B")
+                | Some("DRAW")
+                | Some("FORFEIT_A")
+                | Some("FORFEIT_B")
+                | Some("BOTH_FORFEIT")
+                | Some("VOIDED")
+        )
+    {
+        return Err(IndexerError::InvalidBattle);
+    }
+
+    let played_result = matches!(
+        battle.result.as_deref(),
+        Some("PLAYER_A") | Some("PLAYER_B") | Some("DRAW")
+    );
+    if terminal_league_battle && played_result {
+        let (Some(score_a), Some(score_b)) = (battle.score_a_q9, battle.score_b_q9) else {
+            return Err(IndexerError::InvalidBattle);
+        };
+        let score_order = score_a.cmp(&score_b);
+        let result_matches = match battle.result.as_deref() {
+            Some("PLAYER_A") => score_order.is_gt(),
+            Some("PLAYER_B") => score_order.is_lt(),
+            Some("DRAW") => score_order.is_eq(),
+            _ => false,
+        };
+        if !result_matches {
+            return Err(IndexerError::InvalidBattle);
+        }
+    }
+    Ok(())
 }
 
 /// Decoded on-chain LeagueMember state supplied by a chain reader.
@@ -173,11 +232,7 @@ pub async fn upsert_market_round(
 }
 
 pub async fn upsert_battle(pool: &PgPool, battle: &IndexedBattle) -> Result<(), IndexerError> {
-    if battle.player_a == battle.player_b {
-        return Err(IndexerError::Storage(
-            "indexed Battle cannot contain the same player twice".to_owned(),
-        ));
-    }
+    validate_battle(battle)?;
 
     sqlx::query(
         "INSERT INTO users (wallet, created_at)
@@ -194,8 +249,8 @@ pub async fn upsert_battle(pool: &PgPool, battle: &IndexedBattle) -> Result<(), 
     sqlx::query(
         "INSERT INTO battles
             (chain_pubkey, market_round_id, mode, rated,
-             player_a, player_b, state, result, indexed_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+             player_a, player_b, state, result, score_a_q9, score_b_q9, indexed_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
          ON CONFLICT (chain_pubkey) DO UPDATE SET
              market_round_id = EXCLUDED.market_round_id,
              mode = EXCLUDED.mode,
@@ -204,6 +259,8 @@ pub async fn upsert_battle(pool: &PgPool, battle: &IndexedBattle) -> Result<(), 
              player_b = EXCLUDED.player_b,
              state = EXCLUDED.state,
              result = EXCLUDED.result,
+             score_a_q9 = EXCLUDED.score_a_q9,
+             score_b_q9 = EXCLUDED.score_b_q9,
              indexed_at = EXCLUDED.indexed_at",
     )
     .bind(&battle.chain_pubkey)
@@ -214,6 +271,8 @@ pub async fn upsert_battle(pool: &PgPool, battle: &IndexedBattle) -> Result<(), 
     .bind(&battle.player_b)
     .bind(&battle.state)
     .bind(&battle.result)
+    .bind(battle.score_a_q9)
+    .bind(battle.score_b_q9)
     .bind(battle.indexed_at)
     .execute(pool)
     .await
@@ -357,5 +416,31 @@ mod tests {
             validate_league_member(&member),
             Err(IndexerError::InvalidLeagueMember)
         );
+    }
+
+    #[test]
+    fn indexer_requires_exact_scores_for_terminal_played_league_battles() {
+        let mut battle = IndexedBattle {
+            chain_pubkey: bs58::encode([7; 32]).into_string(),
+            market_round_id: 3,
+            mode: "LEAGUE".to_owned(),
+            rated: true,
+            player_a: bs58::encode([1; 32]).into_string(),
+            player_b: bs58::encode([2; 32]).into_string(),
+            state: "FINALIZED".to_owned(),
+            result: Some("PLAYER_A".to_owned()),
+            score_a_q9: None,
+            score_b_q9: None,
+            indexed_at: 10,
+        };
+
+        assert_eq!(validate_battle(&battle), Err(IndexerError::InvalidBattle));
+
+        battle.score_a_q9 = Some(60_000_000);
+        battle.score_b_q9 = Some(40_000_000);
+        assert!(validate_battle(&battle).is_ok());
+
+        battle.result = Some("DRAW".to_owned());
+        assert_eq!(validate_battle(&battle), Err(IndexerError::InvalidBattle));
     }
 }

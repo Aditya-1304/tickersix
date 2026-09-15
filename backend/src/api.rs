@@ -62,6 +62,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/leagues/:id/join", post(join_league))
         .route("/v1/leagues/:id/leave", post(leave_league))
         .route("/v1/leagues/:id/rounds", get(get_league_rounds))
+        .route("/v1/leagues/:id/standings", get(get_league_standings))
         .route(
             "/v1/ranked/queue",
             post(join_ranked_queue).delete(leave_ranked_queue),
@@ -208,7 +209,9 @@ impl IntoResponse for ApiError {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
             Self::Leaderboard(LeaderboardError::Storage(_)) => StatusCode::INTERNAL_SERVER_ERROR,
-            Self::League(LeagueError::Storage(_)) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::League(LeagueError::InvalidStandings | LeagueError::Storage(_)) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
             Self::Live(LiveError::Storage(_)) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Ranked(RankedError::Storage(_)) => StatusCode::INTERNAL_SERVER_ERROR,
         };
@@ -455,6 +458,15 @@ async fn get_league_rounds(
     Ok(Json(league::list_rounds(&state.pool, league_id).await?))
 }
 
+async fn get_league_standings(
+    State(state): State<ApiState>,
+    Path(league_id): Path<i64>,
+) -> Result<Json<league::LeagueStandings>, ApiError> {
+    Ok(Json(
+        league::get_league_standings(&state.pool, league_id).await?,
+    ))
+}
+
 async fn join_ranked_queue(
     State(state): State<ApiState>,
     headers: HeaderMap,
@@ -592,6 +604,7 @@ fn error_code(error: &ApiError) -> &'static str {
         ApiError::League(LeagueError::PairingConflict) => "PAIRING_CONFLICT",
         ApiError::League(LeagueError::CoordinatorPlanUnavailable) => "COORDINATOR_PLAN_UNAVAILABLE",
         ApiError::League(LeagueError::CoordinatorConflict) => "COORDINATOR_CONFLICT",
+        ApiError::League(LeagueError::InvalidStandings) => "INVALID_LEAGUE_STANDINGS",
         ApiError::Live(LiveError::InvalidBattle) => "INVALID_BATTLE",
         ApiError::Live(LiveError::NotFound) => "BATTLE_NOT_FOUND",
         ApiError::Live(LiveError::Storage(_)) => "INTERNAL_ERROR",

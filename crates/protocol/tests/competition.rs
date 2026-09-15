@@ -1,3 +1,5 @@
+use std::collections::HashSet;
+
 use protocol::{
     apply_elo_update, league_pairing_seed, league_standings_input_hash, pair_ranked, pair_swiss,
     EloOutcome, PairingPlayer, RankedPlayer,
@@ -40,6 +42,53 @@ fn swiss_pairing_is_deterministic_complete_and_repeat_avoiding() {
     }
     seen.sort_unstable();
     assert_eq!(seen, (0..players.len()).collect::<Vec<_>>());
+}
+
+#[test]
+fn league_gate_simulates_one_hundred_players_for_five_rounds() {
+    // This is the release-sized invariant gate: every player is exposed once
+    // per Market Round, and the Swiss engine must avoid all formal rematches
+    // across the five-round schedule while retaining deterministic output.
+    let wallets = (0u8..100).map(|id| [id; 32]).collect::<Vec<_>>();
+    let mut prior_opponents = vec![Vec::<[u8; 32]>::new(); wallets.len()];
+    let mut exposures = HashSet::new();
+
+    for round in 1u8..=5 {
+        let players = wallets
+            .iter()
+            .enumerate()
+            .map(|(index, wallet)| PairingPlayer {
+                wallet: *wallet,
+                league_points: u32::from(100 - (index % 5) as u8) * 3,
+                rating: 1500,
+                bye_count: 0,
+                prior_opponents: prior_opponents[index].clone(),
+            })
+            .collect::<Vec<_>>();
+        let result = pair_swiss(&players, [round; 32]).unwrap();
+
+        assert_eq!(result.pairs.len(), 50);
+        assert!(result.bye.is_none());
+        let mut round_players = HashSet::new();
+        for (left, right) in result.pairs {
+            assert_ne!(left, right);
+            assert!(!players[left]
+                .prior_opponents
+                .contains(&players[right].wallet));
+            assert!(!players[right]
+                .prior_opponents
+                .contains(&players[left].wallet));
+            assert!(round_players.insert(left));
+            assert!(round_players.insert(right));
+            assert!(exposures.insert((round, players[left].wallet)));
+            assert!(exposures.insert((round, players[right].wallet)));
+            prior_opponents[left].push(players[right].wallet);
+            prior_opponents[right].push(players[left].wallet);
+        }
+        assert_eq!(round_players.len(), wallets.len());
+    }
+
+    assert_eq!(exposures.len(), wallets.len() * 5);
 }
 
 #[test]
