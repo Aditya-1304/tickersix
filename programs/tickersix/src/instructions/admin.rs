@@ -3,11 +3,14 @@ use anchor_lang::prelude::*;
 use crate::{
     constants::{
         ASSET_SEED, ATTESTOR_COUNT, ATTESTOR_QUORUM, ATTESTOR_SET_SEED, CONFIG_SEED,
-        MAX_ASSETS_PER_REGISTRY, PRICE_POLICY_SEED, PROTOCOL_VERSION, QUALITY_POLICY_SEED,
+        JUPITER_SOURCE_CONFIG_SEED, MAX_ASSETS_PER_REGISTRY, PRICE_POLICY_SEED, PROTOCOL_VERSION,
+        QUALITY_POLICY_SEED,
     },
     error::ErrorCode,
     state::{
-        AssetRegistryEntry, AttestorSet, Config, MarketQualityPolicy, PricePolicy, PriceSourceKind,
+        AssetRegistryEntry, AttestorSet, ComparabilityKind, CompetitionDomain, Config,
+        InstrumentStructureKind, JupiterSourceConfig, LifecycleState, MarketQualityPolicy,
+        PricePolicy, PriceSourceKind, ProviderKind, RepresentationDescriptor,
     },
 };
 
@@ -30,9 +33,11 @@ pub fn handle_initialize_config(ctx: Context<InitializeConfig>) -> Result<()> {
     config.last_market_round_id = 0;
     config.last_market_round_end_at = 0;
     config.protocol_version = PROTOCOL_VERSION;
+    config.current_settlement_policy_version = 0;
     config.current_price_policy_version = 0;
     config.current_market_quality_policy_version = 0;
     config.current_attestor_set_version = 0;
+    config.current_jupiter_source_config_version = 0;
     config.bump = ctx.bumps.config;
     Ok(())
 }
@@ -104,11 +109,26 @@ pub fn handle_create_price_policy(
     min_accepted_observations: u16,
     min_unique_source_blocks: u16,
     max_source_block_lag: u64,
+    canonical_policy_hash: [u8; 32],
+    source_config: Pubkey,
 ) -> Result<()> {
     require_admin(&ctx.accounts.config, &ctx.accounts.payer)?;
     require!(
-        version > ctx.accounts.config.current_price_policy_version,
+        version > ctx.accounts.config.current_settlement_policy_version,
         ErrorCode::InvalidPolicyVersion
+    );
+    require!(
+        source_kind == PriceSourceKind::JupiterTokenSpotV1,
+        ErrorCode::UnsupportedSettlementSource
+    );
+    let (expected_source_config, _) = Pubkey::find_program_address(
+        &[JUPITER_SOURCE_CONFIG_SEED, &version.to_le_bytes()],
+        &crate::id(),
+    );
+    require_keys_eq!(
+        source_config,
+        expected_source_config,
+        ErrorCode::SourceConfigMismatch
     );
     require!(
         observation_window_secs > 0
@@ -123,19 +143,118 @@ pub fn handle_create_price_policy(
             && max_source_block_lag > 0,
         ErrorCode::UncalibratedPolicy
     );
+    require!(
+        canonical_policy_hash != [0; 32],
+        ErrorCode::UncalibratedPolicy
+    );
 
     let policy = &mut ctx.accounts.price_policy;
     policy.version = version;
     policy.source_kind = source_kind;
+    policy.source_config = source_config;
     policy.observation_window_secs = observation_window_secs;
-    policy.attestation_grace_secs = attestation_grace_secs;
-    policy.sample_interval_secs = sample_interval_secs;
-    policy.max_attestor_spread_bps = max_attestor_spread_bps;
-    policy.min_accepted_observations = min_accepted_observations;
-    policy.min_unique_source_blocks = min_unique_source_blocks;
-    policy.max_source_block_lag = max_source_block_lag;
+    policy.canonical_policy_hash = canonical_policy_hash;
     policy.bump = ctx.bumps.price_policy;
+    ctx.accounts.config.current_settlement_policy_version = version;
     ctx.accounts.config.current_price_policy_version = version;
+    Ok(())
+}
+
+/// Canonical Slice 1 entry point for creating an immutable settlement policy.
+/// The legacy handler remains available so existing Jupiter clients can
+/// migrate without changing their report-message serialization in place.
+pub fn handle_create_settlement_policy(
+    ctx: Context<CreatePricePolicy>,
+    version: u16,
+    source_kind: PriceSourceKind,
+    observation_window_secs: u16,
+    attestation_grace_secs: u16,
+    sample_interval_secs: u16,
+    max_attestor_spread_bps: u16,
+    min_accepted_observations: u16,
+    min_unique_source_blocks: u16,
+    max_source_block_lag: u64,
+    canonical_policy_hash: [u8; 32],
+    source_config: Pubkey,
+) -> Result<()> {
+    handle_create_price_policy(
+        ctx,
+        version,
+        source_kind,
+        observation_window_secs,
+        attestation_grace_secs,
+        sample_interval_secs,
+        max_attestor_spread_bps,
+        min_accepted_observations,
+        min_unique_source_blocks,
+        max_source_block_lag,
+        canonical_policy_hash,
+        source_config,
+    )
+}
+
+#[derive(Accounts)]
+#[instruction(version: u16)]
+pub struct CreateJupiterSourceConfig<'info> {
+    #[account(mut, seeds = [CONFIG_SEED], bump = config.bump)]
+    pub config: Account<'info, Config>,
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    #[account(
+        init,
+        payer = payer,
+        space = 8 + JupiterSourceConfig::INIT_SPACE,
+        seeds = [JUPITER_SOURCE_CONFIG_SEED, &version.to_le_bytes()],
+        bump
+    )]
+    pub jupiter_source_config: Account<'info, JupiterSourceConfig>,
+    #[account(
+        seeds = [ATTESTOR_SET_SEED, &attestor_set.version.to_le_bytes()],
+        bump = attestor_set.bump,
+        constraint = attestor_set.version == config.current_attestor_set_version @ ErrorCode::InvalidPolicyVersion
+    )]
+    pub attestor_set: Account<'info, AttestorSet>,
+    pub system_program: Program<'info, System>,
+}
+
+pub fn handle_create_jupiter_source_config(
+    ctx: Context<CreateJupiterSourceConfig>,
+    version: u16,
+    attestation_grace_secs: u16,
+    sample_interval_secs: u16,
+    max_attestor_spread_bps: u16,
+    min_accepted_observations: u16,
+    min_unique_source_blocks: u16,
+    max_source_block_lag: u64,
+) -> Result<()> {
+    require_admin(&ctx.accounts.config, &ctx.accounts.payer)?;
+    require!(
+        version > ctx.accounts.config.current_jupiter_source_config_version,
+        ErrorCode::InvalidPolicyVersion
+    );
+    require!(
+        attestation_grace_secs > 0
+            && sample_interval_secs > 0
+            && max_attestor_spread_bps > 0
+            && max_attestor_spread_bps <= 10_000
+            && min_accepted_observations > 0
+            && min_unique_source_blocks > 0
+            && min_unique_source_blocks <= min_accepted_observations
+            && max_source_block_lag > 0,
+        ErrorCode::UncalibratedPolicy
+    );
+
+    let config = &mut ctx.accounts.jupiter_source_config;
+    config.version = version;
+    config.attestor_set_version = ctx.accounts.attestor_set.version;
+    config.attestation_grace_secs = attestation_grace_secs;
+    config.sample_interval_secs = sample_interval_secs;
+    config.max_attestor_spread_bps = max_attestor_spread_bps;
+    config.min_accepted_observations = min_accepted_observations;
+    config.min_unique_source_blocks = min_unique_source_blocks;
+    config.max_source_block_lag = max_source_block_lag;
+    config.bump = ctx.bumps.jupiter_source_config;
+    ctx.accounts.config.current_jupiter_source_config_version = version;
     Ok(())
 }
 
@@ -162,6 +281,7 @@ pub fn handle_create_market_quality_policy(
     version: u16,
     canonical_policy_hash: [u8; 32],
     min_eligible_assets: u16,
+    competition_domain: CompetitionDomain,
 ) -> Result<()> {
     require_admin(&ctx.accounts.config, &ctx.accounts.payer)?;
     require!(
@@ -179,6 +299,7 @@ pub fn handle_create_market_quality_policy(
 
     let policy = &mut ctx.accounts.market_quality_policy;
     policy.version = version;
+    policy.competition_domain = competition_domain;
     policy.canonical_policy_hash = canonical_policy_hash;
     policy.min_eligible_assets = min_eligible_assets;
     policy.bump = ctx.bumps.market_quality_policy;
@@ -292,12 +413,38 @@ pub fn handle_create_registry_entry(
         ErrorCode::InvalidScoringMint
     );
 
+    let token_program = "TokenzQdBNbLqP5VEhdkasr7vJcSa1qw8aH1dyW9jGJ"
+        .parse::<Pubkey>()
+        .map_err(|_| error!(ErrorCode::RegistryEntryMismatch))?;
     let asset = &mut ctx.accounts.asset;
     asset.registry_version = registry_version;
     asset.asset_id = asset_id;
-    asset.symbol = symbol;
+    asset.symbol = [
+        symbol[0], symbol[1], symbol[2], symbol[3], symbol[4], symbol[5], symbol[6], symbol[7], 0,
+        0, 0, 0, 0, 0, 0, 0,
+    ];
     asset.scoring_mint = scoring_mint;
     asset.issuer_kind = issuer_kind;
+    asset.descriptor = RepresentationDescriptor {
+        registry_version,
+        asset_id,
+        representation_id: u32::from(asset_id),
+        provider_kind: if issuer_kind == 1 {
+            ProviderKind::XStocks
+        } else {
+            ProviderKind::OtherApproved
+        },
+        structure_kind: InstrumentStructureKind::TokenizedPublicEquityExposure,
+        scoring_mint,
+        token_program,
+        decimals: 9,
+        lifecycle_state: LifecycleState::Active,
+        multiplier_policy_version: 1,
+        comparability_kind: ComparabilityKind::CanonicallyComparable,
+        terms_hash: [1; 32],
+        provider_metadata_hash: [issuer_kind; 32],
+        enabled: true,
+    };
     asset.active = true;
     asset.bump = ctx.bumps.asset;
     if registry_version > ctx.accounts.config.current_registry_version {

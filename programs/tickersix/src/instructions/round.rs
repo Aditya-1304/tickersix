@@ -2,13 +2,13 @@ use anchor_lang::prelude::*;
 
 use crate::{
     constants::{
-        ASSET_SEED, CONFIG_SEED, LINEUP_SIZE, MARKET_ROUND_SEED, MAX_ELIGIBLE_ASSETS,
-        PRICE_POLICY_SEED, QUALITY_POLICY_SEED, ROUND_ASSET_SEED,
+        ASSET_SEED, CONFIG_SEED, JUPITER_SOURCE_CONFIG_SEED, LINEUP_SIZE, MARKET_ROUND_SEED,
+        MAX_ELIGIBLE_ASSETS, PRICE_POLICY_SEED, QUALITY_POLICY_SEED, ROUND_ASSET_SEED,
     },
     error::ErrorCode,
     state::{
-        AssetRegistryEntry, AttestorSet, Config, MarketQualityPolicy, MarketRound,
-        MarketRoundState, PricePolicy, RoundAsset,
+        AssetRegistryEntry, AttestorSet, Config, JupiterSourceConfig, MarketQualityPolicy,
+        MarketRound, MarketRoundState, PricePolicy, RoundAsset, SettlementSourceKind,
     },
 };
 
@@ -28,10 +28,15 @@ pub struct CreateMarketRoundDraft<'info> {
     )]
     pub market_round: Account<'info, MarketRound>,
     #[account(
-        seeds = [PRICE_POLICY_SEED, &config.current_price_policy_version.to_le_bytes()],
+        seeds = [PRICE_POLICY_SEED, &config.current_settlement_policy_version.to_le_bytes()],
         bump = price_policy.bump
     )]
     pub price_policy: Account<'info, PricePolicy>,
+    #[account(
+        seeds = [JUPITER_SOURCE_CONFIG_SEED, &config.current_jupiter_source_config_version.to_le_bytes()],
+        bump = jupiter_source_config.bump
+    )]
+    pub jupiter_source_config: Account<'info, JupiterSourceConfig>,
     #[account(
         seeds = [QUALITY_POLICY_SEED, &config.current_market_quality_policy_version.to_le_bytes()],
         bump = market_quality_policy.bump
@@ -86,17 +91,31 @@ pub fn handle_create_market_round_draft(
         ErrorCode::RegistryNotFrozen
     );
     require!(
-        ctx.accounts.price_policy.version == ctx.accounts.config.current_price_policy_version
+        ctx.accounts.price_policy.version == ctx.accounts.config.current_settlement_policy_version
             && ctx.accounts.market_quality_policy.version
                 == ctx.accounts.config.current_market_quality_policy_version
             && ctx.accounts.attestor_set.version
-                == ctx.accounts.config.current_attestor_set_version,
+                == ctx.accounts.config.current_attestor_set_version
+            && ctx.accounts.jupiter_source_config.version
+                == ctx.accounts.config.current_jupiter_source_config_version,
         ErrorCode::InvalidPolicyVersion
+    );
+    require!(
+        ctx.accounts.price_policy.source_kind == SettlementSourceKind::JupiterTokenSpotV1
+            && ctx.accounts.price_policy.source_config == ctx.accounts.jupiter_source_config.key()
+            && ctx.accounts.jupiter_source_config.attestor_set_version
+                == ctx.accounts.attestor_set.version,
+        ErrorCode::SourceConfigMismatch
     );
 
     let round = &mut ctx.accounts.market_round;
     round.round_id = round_id;
     round.registry_version = registry_version;
+    round.competition_domain = ctx.accounts.market_quality_policy.competition_domain;
+    round.settlement_policy_version = ctx.accounts.price_policy.version;
+    round.settlement_source_kind = ctx.accounts.price_policy.source_kind;
+    round.settlement_source_config = ctx.accounts.price_policy.source_config;
+    round.jupiter_source_config_version = ctx.accounts.jupiter_source_config.version;
     round.price_policy_version = ctx.accounts.price_policy.version;
     round.market_quality_policy_version = ctx.accounts.market_quality_policy.version;
     round.attestor_set_version = ctx.accounts.attestor_set.version;
@@ -109,8 +128,8 @@ pub fn handle_create_market_round_draft(
     round.start_target_at = start_target_at;
     round.end_target_at = end_target_at;
     round.observation_window_secs = ctx.accounts.price_policy.observation_window_secs;
-    round.attestation_grace_secs = ctx.accounts.price_policy.attestation_grace_secs;
-    round.max_attestor_spread_bps = ctx.accounts.price_policy.max_attestor_spread_bps;
+    round.attestation_grace_secs = ctx.accounts.jupiter_source_config.attestation_grace_secs;
+    round.max_attestor_spread_bps = ctx.accounts.jupiter_source_config.max_attestor_spread_bps;
     round.eligible_asset_bitmap = [0; 4];
     round.round_asset_count = 0;
     round.rated_battle_count = 0;
@@ -152,10 +171,15 @@ pub struct AddRoundAsset<'info> {
     )]
     pub registry_entry: Account<'info, AssetRegistryEntry>,
     #[account(
-        seeds = [PRICE_POLICY_SEED, &market_round.price_policy_version.to_le_bytes()],
+        seeds = [PRICE_POLICY_SEED, &market_round.settlement_policy_version.to_le_bytes()],
         bump = price_policy.bump
     )]
     pub price_policy: Account<'info, PricePolicy>,
+    #[account(
+        seeds = [JUPITER_SOURCE_CONFIG_SEED, &market_round.jupiter_source_config_version.to_le_bytes()],
+        bump = jupiter_source_config.bump
+    )]
+    pub jupiter_source_config: Account<'info, JupiterSourceConfig>,
     #[account(
         seeds = [QUALITY_POLICY_SEED, &market_round.market_quality_policy_version.to_le_bytes()],
         bump = market_quality_policy.bump
@@ -204,6 +228,26 @@ pub fn handle_add_round_asset(
         ErrorCode::PricePolicyMismatch
     );
     require!(
+        ctx.accounts.market_round.settlement_source_kind == price_source_kind
+            && ctx.accounts.market_round.settlement_policy_version
+                == ctx.accounts.price_policy.version
+            && ctx.accounts.market_round.settlement_source_config
+                == ctx.accounts.jupiter_source_config.key()
+            && ctx.accounts.price_policy.source_config == ctx.accounts.jupiter_source_config.key(),
+        ErrorCode::SourceConfigMismatch
+    );
+    require!(
+        ctx.accounts.registry_entry.descriptor.enabled
+            && ctx.accounts.registry_entry.descriptor.lifecycle_state
+                == crate::state::LifecycleState::Active
+            && ctx.accounts.registry_entry.descriptor.comparability_kind
+                != crate::state::ComparabilityKind::Unsupported
+            && ctx.accounts.registry_entry.descriptor.registry_version
+                == ctx.accounts.market_round.registry_version
+            && ctx.accounts.registry_entry.descriptor.asset_id == asset_id,
+        ErrorCode::RegistryEntryMismatch
+    );
+    require!(
         ctx.accounts.market_round.round_asset_count < MAX_ELIGIBLE_ASSETS,
         ErrorCode::InsufficientEligibleAssets
     );
@@ -239,17 +283,24 @@ pub fn handle_add_round_asset(
     round_asset.market_round = ctx.accounts.market_round.key();
     round_asset.asset_id = asset_id;
     round_asset.scoring_mint = scoring_mint;
+    round_asset.token_program = ctx.accounts.registry_entry.descriptor.token_program;
+    round_asset.representation_id = ctx.accounts.registry_entry.descriptor.representation_id;
+    round_asset.provider_kind = ctx.accounts.registry_entry.descriptor.provider_kind;
     round_asset.issuer_kind = issuer_kind;
+    round_asset.settlement_source_kind = price_source_kind;
     round_asset.price_source_kind = price_source_kind;
+    round_asset.settlement_policy_version = price_policy_version;
     round_asset.price_policy_version = price_policy_version;
     round_asset.market_quality_policy_version = market_quality_policy_version;
     round_asset.start_price_q9 = 0;
     round_asset.start_finalized = false;
     round_asset.start_unavailable = false;
+    round_asset.start_evidence_kind = crate::state::EvidenceKind::None;
     round_asset.start_evidence_commitment = [0; 32];
     round_asset.end_price_q9 = 0;
     round_asset.end_finalized = false;
     round_asset.end_unavailable = false;
+    round_asset.end_evidence_kind = crate::state::EvidenceKind::None;
     round_asset.end_evidence_commitment = [0; 32];
     round_asset.return_q9 = 0;
     round_asset.available = false;
@@ -268,10 +319,15 @@ pub struct FreezeMarketRound<'info> {
     )]
     pub market_round: Account<'info, MarketRound>,
     #[account(
-        seeds = [PRICE_POLICY_SEED, &market_round.price_policy_version.to_le_bytes()],
+        seeds = [PRICE_POLICY_SEED, &market_round.settlement_policy_version.to_le_bytes()],
         bump = price_policy.bump
     )]
     pub price_policy: Account<'info, PricePolicy>,
+    #[account(
+        seeds = [JUPITER_SOURCE_CONFIG_SEED, &market_round.jupiter_source_config_version.to_le_bytes()],
+        bump = jupiter_source_config.bump
+    )]
+    pub jupiter_source_config: Account<'info, JupiterSourceConfig>,
     #[account(
         seeds = [QUALITY_POLICY_SEED, &market_round.market_quality_policy_version.to_le_bytes()],
         bump = market_quality_policy.bump
@@ -297,8 +353,19 @@ pub fn handle_freeze_market_round(ctx: Context<FreezeMarketRound>) -> Result<()>
         round.price_policy_version == ctx.accounts.price_policy.version,
         ErrorCode::PricePolicyMismatch
     );
+    validate_jupiter_source_binding(
+        round,
+        &ctx.accounts.price_policy,
+        &ctx.accounts.jupiter_source_config,
+        &ctx.accounts.attestor_set,
+        ctx.accounts.jupiter_source_config.key(),
+    )?;
     require!(
         round.market_quality_policy_version == ctx.accounts.market_quality_policy.version,
+        ErrorCode::QualityPolicyMismatch
+    );
+    require!(
+        round.competition_domain == ctx.accounts.market_quality_policy.competition_domain,
         ErrorCode::QualityPolicyMismatch
     );
     require!(
@@ -356,10 +423,15 @@ pub struct FinalizeMarketRound<'info> {
     )]
     pub market_round: Account<'info, MarketRound>,
     #[account(
-        seeds = [PRICE_POLICY_SEED, &market_round.price_policy_version.to_le_bytes()],
+        seeds = [PRICE_POLICY_SEED, &market_round.settlement_policy_version.to_le_bytes()],
         bump = price_policy.bump
     )]
     pub price_policy: Account<'info, PricePolicy>,
+    #[account(
+        seeds = [JUPITER_SOURCE_CONFIG_SEED, &market_round.jupiter_source_config_version.to_le_bytes()],
+        bump = jupiter_source_config.bump
+    )]
+    pub jupiter_source_config: Account<'info, JupiterSourceConfig>,
     #[account(
         seeds = [QUALITY_POLICY_SEED, &market_round.market_quality_policy_version.to_le_bytes()],
         bump = market_quality_policy.bump
@@ -381,6 +453,12 @@ pub fn handle_finalize_market_round(ctx: Context<FinalizeMarketRound>) -> Result
         round.rated_battle_count == round.resolved_battle_count,
         ErrorCode::InvalidBattleState
     );
+    validate_jupiter_policy_binding(
+        round,
+        &ctx.accounts.price_policy,
+        &ctx.accounts.jupiter_source_config,
+        ctx.accounts.jupiter_source_config.key(),
+    )?;
 
     validate_round_assets(
         ctx.remaining_accounts,
@@ -432,6 +510,7 @@ fn validate_round_assets(
 
     let mut seen_asset_ids = [0u64; 4];
     let mut seen_mints = Vec::with_capacity(accounts.len());
+    let mut seen_representations = Vec::with_capacity(accounts.len());
     for account in accounts {
         require_keys_eq!(*account.owner, crate::id(), ErrorCode::WrongMarketRound);
         let data = account.try_borrow_data()?;
@@ -462,8 +541,14 @@ fn validate_round_assets(
         require!(
             asset.price_policy_version == price_policy.version
                 && asset.price_source_kind == price_policy.source_kind
+                && asset.settlement_policy_version == round.settlement_policy_version
+                && asset.settlement_source_kind == round.settlement_source_kind
                 && asset.market_quality_policy_version == market_quality_policy.version,
             ErrorCode::InvalidPolicyVersion
+        );
+        require!(
+            asset.token_program != Pubkey::default(),
+            ErrorCode::RegistryEntryMismatch
         );
         require!(
             seen_asset_ids[word] & bit == 0,
@@ -473,8 +558,13 @@ fn validate_round_assets(
             !seen_mints.contains(&asset.scoring_mint),
             ErrorCode::DuplicateRoundAsset
         );
+        require!(
+            !seen_representations.contains(&asset.representation_id),
+            ErrorCode::DuplicateRoundAsset
+        );
         seen_asset_ids[word] |= bit;
         seen_mints.push(asset.scoring_mint);
+        seen_representations.push(asset.representation_id);
     }
     require!(
         seen_asset_ids == round.eligible_asset_bitmap,
@@ -520,14 +610,104 @@ fn require_coordinator(config: &Config, signer: &Signer) -> Result<()> {
     Ok(())
 }
 
+/// Binds the frozen round to exactly one immutable Jupiter source config and
+/// the attestor set referenced by that config. This is the source-abstraction
+/// gate: later callers may only supply the PDAs whose versions were copied at
+/// draft creation and rechecked at freeze/finalization.
+pub(crate) fn validate_jupiter_source_binding(
+    round: &MarketRound,
+    policy: &PricePolicy,
+    jupiter_config: &JupiterSourceConfig,
+    attestor_set: &AttestorSet,
+    jupiter_config_key: Pubkey,
+) -> Result<()> {
+    validate_jupiter_policy_binding(round, policy, jupiter_config, jupiter_config_key)?;
+    require!(
+        jupiter_config.attestor_set_version == attestor_set.version
+            && round.attestor_set_version == attestor_set.version,
+        ErrorCode::SourceConfigMismatch
+    );
+    Ok(())
+}
+
+pub(crate) fn validate_jupiter_policy_binding(
+    round: &MarketRound,
+    policy: &PricePolicy,
+    jupiter_config: &JupiterSourceConfig,
+    jupiter_config_key: Pubkey,
+) -> Result<()> {
+    require!(
+        round.settlement_source_kind == SettlementSourceKind::JupiterTokenSpotV1
+            && policy.source_kind == SettlementSourceKind::JupiterTokenSpotV1,
+        ErrorCode::UnsupportedSettlementSource
+    );
+    require!(
+        round.settlement_policy_version == policy.version
+            && round.price_policy_version == policy.version
+            && round.settlement_source_config == jupiter_config_key
+            && policy.source_config == jupiter_config_key
+            && round.jupiter_source_config_version == jupiter_config.version,
+        ErrorCode::SourceConfigMismatch
+    );
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mismatched_jupiter_source_config_is_rejected_before_freeze() {
+        let round = MarketRound {
+            settlement_source_kind: crate::state::SettlementSourceKind::JupiterTokenSpotV1,
+            settlement_source_config: Pubkey::new_from_array([1; 32]),
+            ..round()
+        };
+        let policy = PricePolicy {
+            version: 1,
+            source_kind: crate::state::SettlementSourceKind::JupiterTokenSpotV1,
+            source_config: Pubkey::new_from_array([1; 32]),
+            observation_window_secs: 10,
+            canonical_policy_hash: [3; 32],
+            bump: 1,
+        };
+        let jupiter_config = JupiterSourceConfig {
+            version: 1,
+            attestor_set_version: 1,
+            attestation_grace_secs: 10,
+            sample_interval_secs: 5,
+            max_attestor_spread_bps: 100,
+            min_accepted_observations: 1,
+            min_unique_source_blocks: 1,
+            max_source_block_lag: 100,
+            bump: 1,
+        };
+        let attestor_set = AttestorSet {
+            version: 1,
+            attestors: [Pubkey::new_from_array([11; 32]); crate::constants::ATTESTOR_COUNT],
+            quorum: crate::constants::ATTESTOR_QUORUM,
+            bump: 1,
+        };
+
+        assert!(validate_jupiter_source_binding(
+            &round,
+            &policy,
+            &jupiter_config,
+            &attestor_set,
+            Pubkey::new_from_array([2; 32]),
+        )
+        .is_err());
+    }
 
     fn round() -> MarketRound {
         MarketRound {
             round_id: 1,
             registry_version: 1,
+            competition_domain: crate::state::CompetitionDomain::PublicEquity,
+            settlement_policy_version: 1,
+            settlement_source_kind: crate::state::SettlementSourceKind::JupiterTokenSpotV1,
+            settlement_source_config: Pubkey::new_from_array([1; 32]),
+            jupiter_source_config_version: 1,
             price_policy_version: 1,
             market_quality_policy_version: 1,
             attestor_set_version: 1,

@@ -817,6 +817,11 @@ mod tests {
         MarketRound {
             round_id: 1,
             registry_version: 1,
+            competition_domain: crate::state::CompetitionDomain::PublicEquity,
+            settlement_policy_version: 1,
+            settlement_source_kind: crate::state::SettlementSourceKind::JupiterTokenSpotV1,
+            settlement_source_config: Pubkey::new_from_array([1; 32]),
+            jupiter_source_config_version: 1,
             price_policy_version: 1,
             market_quality_policy_version: 1,
             attestor_set_version: 1,

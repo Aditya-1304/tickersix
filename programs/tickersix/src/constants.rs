@@ -1,7 +1,13 @@
 use anchor_lang::prelude::*;
 
 pub const CONFIG_SEED: &[u8] = b"config";
-pub const PRICE_POLICY_SEED: &[u8] = b"price-policy";
+pub const SETTLEMENT_POLICY_SEED: &[u8] = b"settlement-policy";
+/// Deprecated source-compatible name. Its bytes intentionally use the
+/// canonical settlement-policy namespace so old clients cannot create a
+/// parallel mutable policy family.
+pub const PRICE_POLICY_SEED: &[u8] = SETTLEMENT_POLICY_SEED;
+pub const JUPITER_SOURCE_CONFIG_SEED: &[u8] = b"jupiter-source-config";
+pub const PYTH_PRO_SOURCE_CONFIG_SEED: &[u8] = b"pyth-pro-source-config";
 pub const QUALITY_POLICY_SEED: &[u8] = b"quality-policy";
 pub const ATTESTOR_SET_SEED: &[u8] = b"attestor-set";
 pub const ASSET_SEED: &[u8] = b"asset";

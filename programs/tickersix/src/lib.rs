@@ -35,12 +35,68 @@ pub mod tickersix {
         min_accepted_observations: u16,
         min_unique_source_blocks: u16,
         max_source_block_lag: u64,
+        canonical_policy_hash: [u8; 32],
+        source_config: Pubkey,
     ) -> Result<()> {
         instructions::admin::handle_create_price_policy(
             ctx,
             version,
             source_kind,
             observation_window_secs,
+            attestation_grace_secs,
+            sample_interval_secs,
+            max_attestor_spread_bps,
+            min_accepted_observations,
+            min_unique_source_blocks,
+            max_source_block_lag,
+            canonical_policy_hash,
+            source_config,
+        )
+    }
+
+    pub fn create_settlement_policy(
+        ctx: Context<CreatePricePolicy>,
+        version: u16,
+        source_kind: PriceSourceKind,
+        observation_window_secs: u16,
+        attestation_grace_secs: u16,
+        sample_interval_secs: u16,
+        max_attestor_spread_bps: u16,
+        min_accepted_observations: u16,
+        min_unique_source_blocks: u16,
+        max_source_block_lag: u64,
+        canonical_policy_hash: [u8; 32],
+        source_config: Pubkey,
+    ) -> Result<()> {
+        instructions::admin::handle_create_settlement_policy(
+            ctx,
+            version,
+            source_kind,
+            observation_window_secs,
+            attestation_grace_secs,
+            sample_interval_secs,
+            max_attestor_spread_bps,
+            min_accepted_observations,
+            min_unique_source_blocks,
+            max_source_block_lag,
+            canonical_policy_hash,
+            source_config,
+        )
+    }
+
+    pub fn create_jupiter_source_config(
+        ctx: Context<CreateJupiterSourceConfig>,
+        version: u16,
+        attestation_grace_secs: u16,
+        sample_interval_secs: u16,
+        max_attestor_spread_bps: u16,
+        min_accepted_observations: u16,
+        min_unique_source_blocks: u16,
+        max_source_block_lag: u64,
+    ) -> Result<()> {
+        instructions::admin::handle_create_jupiter_source_config(
+            ctx,
+            version,
             attestation_grace_secs,
             sample_interval_secs,
             max_attestor_spread_bps,
@@ -55,12 +111,14 @@ pub mod tickersix {
         version: u16,
         canonical_policy_hash: [u8; 32],
         min_eligible_assets: u16,
+        competition_domain: CompetitionDomain,
     ) -> Result<()> {
         instructions::admin::handle_create_market_quality_policy(
             ctx,
             version,
             canonical_policy_hash,
             min_eligible_assets,
+            competition_domain,
         )
     }
 

@@ -31,6 +31,13 @@ fn pda(seeds: &[&[u8]]) -> Pubkey {
     Pubkey::find_program_address(seeds, &tickersix::ID).0
 }
 
+fn jupiter_source_config_pda(version: u16) -> Pubkey {
+    pda(&[
+        tickersix::JUPITER_SOURCE_CONFIG_SEED,
+        &version.to_le_bytes(),
+    ])
+}
+
 fn league_member_pda(league: Pubkey, player: &Keypair) -> Pubkey {
     pda(&[
         tickersix::LEAGUE_MEMBER_SEED,
@@ -184,6 +191,8 @@ impl Harness {
         attestors: [Pubkey; 3],
     ) -> Vec<Pubkey> {
         let price_policy = pda(&[tickersix::PRICE_POLICY_SEED, &1u16.to_le_bytes()]);
+        let jupiter_source_config =
+            pda(&[tickersix::JUPITER_SOURCE_CONFIG_SEED, &1u16.to_le_bytes()]);
         self.submit(
             Arc::clone(&self.coordinator),
             Instruction {
@@ -204,6 +213,8 @@ impl Harness {
                     min_accepted_observations: 1,
                     min_unique_source_blocks: 1,
                     max_source_block_lag: 100,
+                    canonical_policy_hash: [8; 32],
+                    source_config: jupiter_source_config,
                 }
                 .data(),
             },
@@ -226,6 +237,7 @@ impl Harness {
                     version: 1,
                     canonical_policy_hash: [9; 32],
                     min_eligible_assets: 6,
+                    competition_domain: tickersix::CompetitionDomain::PublicEquity,
                 }
                 .data(),
             },
@@ -247,6 +259,32 @@ impl Harness {
                 data: tickersix::instruction::CreateAttestorSet {
                     version: 1,
                     attestors,
+                }
+                .data(),
+            },
+            &[],
+        )
+        .unwrap();
+
+        self.submit(
+            Arc::clone(&self.coordinator),
+            Instruction {
+                program_id: address(tickersix::ID),
+                accounts: vec![
+                    writable(self.config),
+                    writable_signer(key(&self.coordinator)),
+                    writable(jupiter_source_config),
+                    readonly(attestor_set),
+                    system_program(),
+                ],
+                data: tickersix::instruction::CreateJupiterSourceConfig {
+                    version: 1,
+                    attestation_grace_secs: 10,
+                    sample_interval_secs: 5,
+                    max_attestor_spread_bps: 100,
+                    min_accepted_observations: 1,
+                    min_unique_source_blocks: 1,
+                    max_source_block_lag: 100,
                 }
                 .data(),
             },
@@ -318,6 +356,8 @@ impl Harness {
         let mints = self.configure_policies_and_registry_with_attestors(attestors);
         let round = pda(&[tickersix::MARKET_ROUND_SEED, &1u64.to_le_bytes()]);
         let price_policy = pda(&[tickersix::PRICE_POLICY_SEED, &1u16.to_le_bytes()]);
+        let jupiter_source_config =
+            pda(&[tickersix::JUPITER_SOURCE_CONFIG_SEED, &1u16.to_le_bytes()]);
         let quality_policy = pda(&[tickersix::QUALITY_POLICY_SEED, &1u16.to_le_bytes()]);
         let attestor_set = pda(&[tickersix::ATTESTOR_SET_SEED, &1u16.to_le_bytes()]);
 
@@ -330,6 +370,7 @@ impl Harness {
                     writable_signer(key(&self.coordinator)),
                     writable(round),
                     readonly(price_policy),
+                    readonly(jupiter_source_config),
                     readonly(quality_policy),
                     readonly(attestor_set),
                     system_program(),
@@ -371,6 +412,7 @@ impl Harness {
                 writable(round_asset),
                 readonly(registry_entry),
                 readonly(price_policy),
+                readonly(jupiter_source_config),
                 readonly(quality_policy),
                 system_program(),
             ];
@@ -400,6 +442,7 @@ impl Harness {
             readonly(self.config),
             writable(round),
             readonly(price_policy),
+            readonly(jupiter_source_config),
             readonly(quality_policy),
             readonly(attestor_set),
             readonly_signer(key(&self.coordinator)),
@@ -601,6 +644,7 @@ fn submit_attestation(
         readonly(round_asset),
         readonly(round),
         readonly(price_policy),
+        readonly(jupiter_source_config_pda(1)),
         readonly(quality_policy),
         readonly(attestor_set),
         readonly(attestor_key),
@@ -650,6 +694,7 @@ fn finalize_price_phase(
         writable(round_asset),
         readonly(round),
         readonly(price_policy),
+        readonly(jupiter_source_config_pda(1)),
         readonly(quality_policy),
         readonly(attestor_set),
         writable_signer(key(&harness.coordinator)),
@@ -666,6 +711,109 @@ fn finalize_price_phase(
             &[],
         )
         .unwrap();
+}
+
+#[test]
+fn freeze_rejects_a_mismatched_jupiter_source_config() {
+    // Regression target: a coordinator must not be able to draft a round
+    // under one immutable source configuration and freeze it with another.
+    // The PDA constraint is checked before handler logic, so this catches
+    // account substitution even when the replacement config is otherwise
+    // valid and signed by the same administrator.
+    let mut harness = Harness::new();
+    harness.configure_policies_and_registry_with_attestors([
+        Pubkey::new_from_array([11; 32]),
+        Pubkey::new_from_array([12; 32]),
+        Pubkey::new_from_array([13; 32]),
+    ]);
+
+    let round = pda(&[tickersix::MARKET_ROUND_SEED, &1u64.to_le_bytes()]);
+    let price_policy = pda(&[tickersix::PRICE_POLICY_SEED, &1u16.to_le_bytes()]);
+    let source_config_v1 = jupiter_source_config_pda(1);
+    let source_config_v2 = jupiter_source_config_pda(2);
+    let quality_policy = pda(&[tickersix::QUALITY_POLICY_SEED, &1u16.to_le_bytes()]);
+    let attestor_set = pda(&[tickersix::ATTESTOR_SET_SEED, &1u16.to_le_bytes()]);
+
+    harness
+        .submit(
+            Arc::clone(&harness.coordinator),
+            Instruction {
+                program_id: address(tickersix::ID),
+                accounts: vec![
+                    writable(harness.config),
+                    writable_signer(key(&harness.coordinator)),
+                    writable(round),
+                    readonly(price_policy),
+                    readonly(source_config_v1),
+                    readonly(quality_policy),
+                    readonly(attestor_set),
+                    system_program(),
+                ],
+                data: tickersix::instruction::CreateMarketRoundDraft {
+                    round_id: 1,
+                    registry_version: 1,
+                    eligibility_snapshot_hash: [7; 32],
+                    eligibility_frozen_at: 90,
+                    queue_close_at: 110,
+                    commit_deadline: 120,
+                    reveal_deadline: 130,
+                    start_target_at: 140,
+                    end_target_at: 150,
+                    is_replay: false,
+                }
+                .data(),
+            },
+            &[],
+        )
+        .unwrap();
+
+    harness
+        .submit(
+            Arc::clone(&harness.coordinator),
+            Instruction {
+                program_id: address(tickersix::ID),
+                accounts: vec![
+                    writable(harness.config),
+                    writable_signer(key(&harness.coordinator)),
+                    writable(source_config_v2),
+                    readonly(attestor_set),
+                    system_program(),
+                ],
+                data: tickersix::instruction::CreateJupiterSourceConfig {
+                    version: 2,
+                    attestation_grace_secs: 10,
+                    sample_interval_secs: 5,
+                    max_attestor_spread_bps: 100,
+                    min_accepted_observations: 1,
+                    min_unique_source_blocks: 1,
+                    max_source_block_lag: 100,
+                }
+                .data(),
+            },
+            &[],
+        )
+        .unwrap();
+
+    let freeze_attempt = harness.submit(
+        Arc::clone(&harness.coordinator),
+        Instruction {
+            program_id: address(tickersix::ID),
+            accounts: vec![
+                readonly(harness.config),
+                writable(round),
+                readonly(price_policy),
+                // This is a valid source config, but it is not the config
+                // version copied into the draft at creation time.
+                readonly(source_config_v2),
+                readonly(quality_policy),
+                readonly(attestor_set),
+                readonly_signer(key(&harness.coordinator)),
+            ],
+            data: tickersix::instruction::FreezeMarketRound {}.data(),
+        },
+        &[],
+    );
+    assert!(freeze_attempt.is_err());
 }
 
 #[test]
@@ -961,6 +1109,7 @@ fn attestation_requires_exact_native_signature_and_rejects_duplicate_report() {
             readonly(round_asset),
             readonly(round),
             readonly(price_policy),
+            readonly(jupiter_source_config_pda(1)),
             readonly(quality_policy),
             readonly(attestor_set),
             readonly(attestor),
@@ -1179,6 +1328,7 @@ fn attestation_requires_exact_native_signature_and_rejects_duplicate_report() {
                 writable(round_asset),
                 readonly(round),
                 readonly(price_policy),
+                readonly(jupiter_source_config_pda(1)),
                 readonly(attestor_set),
                 writable_signer(coordinator_key),
                 readonly(price_attestation),
@@ -1202,6 +1352,7 @@ fn attestation_requires_exact_native_signature_and_rejects_duplicate_report() {
                 writable(round_asset),
                 readonly(round),
                 readonly(price_policy),
+                readonly(jupiter_source_config_pda(1)),
                 readonly(quality_policy),
                 readonly(attestor_set),
                 writable_signer(coordinator_key),
@@ -1229,6 +1380,7 @@ fn attestation_requires_exact_native_signature_and_rejects_duplicate_report() {
                 writable(round_asset),
                 readonly(round),
                 readonly(price_policy),
+                readonly(jupiter_source_config_pda(1)),
                 readonly(quality_policy),
                 readonly(attestor_set),
                 writable_signer(coordinator_key),
@@ -1254,6 +1406,7 @@ fn attestation_requires_exact_native_signature_and_rejects_duplicate_report() {
                 writable(round_asset),
                 readonly(round),
                 readonly(price_policy),
+                readonly(jupiter_source_config_pda(1)),
                 readonly(quality_policy),
                 readonly(attestor_set),
                 writable_signer(coordinator_key),
@@ -1292,6 +1445,7 @@ fn attestation_requires_exact_native_signature_and_rejects_duplicate_report() {
                 writable(unavailable_asset),
                 readonly(round),
                 readonly(price_policy),
+                readonly(jupiter_source_config_pda(1)),
                 readonly(quality_policy),
                 readonly(attestor_set),
                 writable_signer(coordinator_key),
@@ -1313,6 +1467,7 @@ fn attestation_requires_exact_native_signature_and_rejects_duplicate_report() {
                 writable(unavailable_asset),
                 readonly(round),
                 readonly(price_policy),
+                readonly(jupiter_source_config_pda(1)),
                 readonly(attestor_set),
                 writable_signer(coordinator_key),
                 readonly(unavailable_attestor_reports[0]),
@@ -1378,6 +1533,7 @@ fn end_phase_requires_a_finalized_start_price() {
                 writable(round_asset),
                 readonly(round),
                 readonly(price_policy),
+                readonly(jupiter_source_config_pda(1)),
                 readonly(quality_policy),
                 readonly(attestor_set),
                 writable_signer(finalizer),
@@ -1435,6 +1591,7 @@ fn frozen_round_admits_one_exposure_and_progresses_clock_state() {
         writable(extra_round_asset),
         readonly(extra_registry_entry),
         readonly(pda(&[tickersix::PRICE_POLICY_SEED, &1u16.to_le_bytes()])),
+        readonly(jupiter_source_config_pda(1)),
         readonly(pda(&[tickersix::QUALITY_POLICY_SEED, &1u16.to_le_bytes()])),
         system_program(),
     ];
@@ -1460,6 +1617,33 @@ fn frozen_round_admits_one_exposure_and_progresses_clock_state() {
 
     // Regression target: policy rotation must affect only future rounds. The
     // already-created round remains bound to its original immutable version.
+    let rotated_jupiter_source_config = jupiter_source_config_pda(2);
+    harness
+        .submit(
+            Arc::clone(&harness.coordinator),
+            Instruction {
+                program_id: address(tickersix::ID),
+                accounts: vec![
+                    writable(harness.config),
+                    writable_signer(key(&harness.coordinator)),
+                    writable(rotated_jupiter_source_config),
+                    readonly(pda(&[tickersix::ATTESTOR_SET_SEED, &1u16.to_le_bytes()])),
+                    system_program(),
+                ],
+                data: tickersix::instruction::CreateJupiterSourceConfig {
+                    version: 2,
+                    attestation_grace_secs: 10,
+                    sample_interval_secs: 5,
+                    max_attestor_spread_bps: 100,
+                    min_accepted_observations: 1,
+                    min_unique_source_blocks: 1,
+                    max_source_block_lag: 100,
+                }
+                .data(),
+            },
+            &[],
+        )
+        .unwrap();
     let rotated_price_policy = pda(&[tickersix::PRICE_POLICY_SEED, &2u16.to_le_bytes()]);
     harness
         .submit(
@@ -1482,6 +1666,11 @@ fn frozen_round_admits_one_exposure_and_progresses_clock_state() {
                     min_accepted_observations: 1,
                     min_unique_source_blocks: 1,
                     max_source_block_lag: 100,
+                    canonical_policy_hash: [8; 32],
+                    source_config: pda(&[
+                        tickersix::JUPITER_SOURCE_CONFIG_SEED,
+                        &2u16.to_le_bytes(),
+                    ]),
                 }
                 .data(),
             },
@@ -2117,6 +2306,7 @@ fn gate2_settles_exact_returns_scores_and_market_round() {
                     let mut accounts = vec![
                         writable(round),
                         readonly(price_policy),
+                        readonly(jupiter_source_config_pda(1)),
                         readonly(quality_policy),
                         readonly_signer(key(&harness.coordinator)),
                     ];
@@ -2241,6 +2431,7 @@ fn unavailable_price_voids_battle_and_system_incident_stays_distinct() {
                             writable(round_assets[0]),
                             readonly(round),
                             readonly(price_policy),
+                            readonly(jupiter_source_config_pda(1)),
                             readonly(attestor_set),
                             writable_signer(key(&harness.coordinator)),
                         ];

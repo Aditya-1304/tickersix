@@ -24,13 +24,14 @@ const ED25519_HEADER_LEN: u16 = 16;
 const ED25519_SIGNATURE_LEN: u16 = 64;
 const ED25519_PUBLIC_KEY_LEN: u16 = 32;
 const MAX_ED25519_MESSAGE_LEN: usize = u16::MAX as usize;
-const RELAYER_ACCOUNT_INDEX: usize = 7;
+const RELAYER_ACCOUNT_INDEX: usize = 8;
 
 /// Accounts needed to relay one signed report. These are public addresses;
 /// the relayer key itself is held by the caller's wallet or signer.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RelayAccounts {
     pub price_policy: [u8; 32],
+    pub jupiter_source_config: [u8; 32],
     pub market_quality_policy: [u8; 32],
     pub attestor_set: [u8; 32],
     pub relayer: [u8; 32],
@@ -40,6 +41,7 @@ pub struct RelayAccounts {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FinalizeAccounts {
     pub price_policy: [u8; 32],
+    pub jupiter_source_config: [u8; 32],
     pub market_quality_policy: [u8; 32],
     pub attestor_set: [u8; 32],
     pub finalizer: [u8; 32],
@@ -182,6 +184,7 @@ pub fn build_submit_price_attestation_plan(
             readonly(address(context.round_asset)),
             readonly(address(context.market_round)),
             readonly(address(accounts.price_policy)),
+            readonly(address(accounts.jupiter_source_config)),
             readonly(address(accounts.market_quality_policy)),
             readonly(address(accounts.attestor_set)),
             readonly(address(report.attestor)),
@@ -480,6 +483,7 @@ pub fn build_finalize_price_phase_instruction(
         writable(address(first_context.round_asset)),
         readonly(address(first_context.market_round)),
         readonly(address(accounts.price_policy)),
+        readonly(address(accounts.jupiter_source_config)),
         readonly(address(accounts.market_quality_policy)),
         readonly(address(accounts.attestor_set)),
         signer(address(accounts.finalizer)),
@@ -500,11 +504,13 @@ pub fn build_finalize_price_phase_instruction(
 /// Builds the explicit fail-closed transition used when a phase misses its
 /// deadline or has no compatible quorum. This instruction never supplies a
 /// replacement price or alternate source.
+#[allow(clippy::too_many_arguments)]
 pub fn build_mark_price_phase_unavailable_instruction(
     phase_number: u8,
     round_asset: [u8; 32],
     market_round: [u8; 32],
     price_policy: [u8; 32],
+    jupiter_source_config: [u8; 32],
     attestor_set: [u8; 32],
     marker: [u8; 32],
     attestors: [[u8; 32]; 3],
@@ -528,6 +534,7 @@ pub fn build_mark_price_phase_unavailable_instruction(
         writable(address(round_asset)),
         readonly(address(market_round)),
         readonly(address(price_policy)),
+        readonly(address(jupiter_source_config)),
         readonly(address(attestor_set)),
         signer(address(marker)),
     ];
@@ -659,6 +666,7 @@ pub fn build_void_battle_system_incident_instruction(
 pub fn build_finalize_market_round_instruction(
     market_round: [u8; 32],
     price_policy: [u8; 32],
+    jupiter_source_config: [u8; 32],
     market_quality_policy: [u8; 32],
     keeper: [u8; 32],
     round_assets: &[[u8; 32]],
@@ -667,6 +675,7 @@ pub fn build_finalize_market_round_instruction(
     let mut accounts = vec![
         writable(address(market_round)),
         readonly(address(price_policy)),
+        readonly(address(jupiter_source_config)),
         readonly(address(market_quality_policy)),
         signer(address(keeper)),
     ];

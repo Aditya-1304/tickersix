@@ -4,14 +4,15 @@ use solana_sdk_ids::ed25519_program;
 
 use crate::{
     constants::{
-        ATTESTATION_DOMAIN, ATTESTOR_COUNT, ATTESTOR_QUORUM, ATTESTOR_SET_SEED, MARKET_ROUND_SEED,
-        PRICE_ATTESTATION_SEED, PRICE_POLICY_SEED, QUALITY_POLICY_SEED, ROUND_ASSET_SEED,
+        ATTESTATION_DOMAIN, ATTESTOR_COUNT, ATTESTOR_QUORUM, ATTESTOR_SET_SEED,
+        JUPITER_SOURCE_CONFIG_SEED, MARKET_ROUND_SEED, PRICE_ATTESTATION_SEED, PRICE_POLICY_SEED,
+        QUALITY_POLICY_SEED, ROUND_ASSET_SEED,
     },
     error::ErrorCode,
     math::return_q9,
     state::{
-        AttestorSet, MarketQualityPolicy, MarketRound, PriceAttestation, PricePhase, PricePolicy,
-        RoundAsset,
+        AttestorSet, JupiterSourceConfig, MarketQualityPolicy, MarketRound, PriceAttestation,
+        PricePhase, PricePolicy, RoundAsset,
     },
 };
 
@@ -44,10 +45,15 @@ pub struct SubmitPriceAttestation<'info> {
     )]
     pub market_round: Account<'info, MarketRound>,
     #[account(
-        seeds = [PRICE_POLICY_SEED, &market_round.price_policy_version.to_le_bytes()],
+        seeds = [PRICE_POLICY_SEED, &market_round.settlement_policy_version.to_le_bytes()],
         bump = price_policy.bump
     )]
     pub price_policy: Account<'info, PricePolicy>,
+    #[account(
+        seeds = [JUPITER_SOURCE_CONFIG_SEED, &market_round.jupiter_source_config_version.to_le_bytes()],
+        bump = jupiter_source_config.bump
+    )]
+    pub jupiter_source_config: Account<'info, JupiterSourceConfig>,
     #[account(
         seeds = [QUALITY_POLICY_SEED, &market_round.market_quality_policy_version.to_le_bytes()],
         bump = market_quality_policy.bump
@@ -91,11 +97,19 @@ pub fn handle_submit_price_attestation(
 ) -> Result<()> {
     let round = &ctx.accounts.market_round;
     let policy = &ctx.accounts.price_policy;
+    let source_config = &ctx.accounts.jupiter_source_config;
     let round_asset = &ctx.accounts.round_asset;
+    crate::instructions::round::validate_jupiter_source_binding(
+        round,
+        policy,
+        &ctx.accounts.jupiter_source_config,
+        &ctx.accounts.attestor_set,
+        ctx.accounts.jupiter_source_config.key(),
+    )?;
     let now = Clock::get()?.unix_timestamp;
     let (window_start, window_end) = phase_window(round, phase)?;
     let submission_deadline = window_end
-        .checked_add(i64::from(policy.attestation_grace_secs))
+        .checked_add(i64::from(source_config.attestation_grace_secs))
         .ok_or_else(|| error!(ErrorCode::MathOverflow))?;
 
     require!(
@@ -108,8 +122,8 @@ pub fn handle_submit_price_attestation(
     );
     require!(median_price_q9 > 0, ErrorCode::InvalidAttestationEvidence);
     require!(
-        accepted_observation_count >= policy.min_accepted_observations
-            && unique_source_block_count >= policy.min_unique_source_blocks
+        accepted_observation_count >= source_config.min_accepted_observations
+            && unique_source_block_count >= source_config.min_unique_source_blocks
             && unique_source_block_count <= accepted_observation_count
             && first_source_block_id <= last_source_block_id,
         ErrorCode::InvalidAttestationEvidence
@@ -117,7 +131,7 @@ pub fn handle_submit_price_attestation(
     let current_slot = Clock::get()?.slot;
     require!(
         last_source_block_id <= current_slot
-            && current_slot - last_source_block_id <= policy.max_source_block_lag,
+            && current_slot - last_source_block_id <= source_config.max_source_block_lag,
         ErrorCode::InvalidAttestationEvidence
     );
     require!(
@@ -206,10 +220,15 @@ pub struct FinalizePricePhase<'info> {
     )]
     pub market_round: Account<'info, MarketRound>,
     #[account(
-        seeds = [PRICE_POLICY_SEED, &market_round.price_policy_version.to_le_bytes()],
+        seeds = [PRICE_POLICY_SEED, &market_round.settlement_policy_version.to_le_bytes()],
         bump = price_policy.bump
     )]
     pub price_policy: Account<'info, PricePolicy>,
+    #[account(
+        seeds = [JUPITER_SOURCE_CONFIG_SEED, &market_round.jupiter_source_config_version.to_le_bytes()],
+        bump = jupiter_source_config.bump
+    )]
+    pub jupiter_source_config: Account<'info, JupiterSourceConfig>,
     #[account(
         seeds = [QUALITY_POLICY_SEED, &market_round.market_quality_policy_version.to_le_bytes()],
         bump = market_quality_policy.bump
@@ -228,9 +247,18 @@ pub fn handle_finalize_price_phase(
     phase: PricePhase,
 ) -> Result<()> {
     let now = Clock::get()?.unix_timestamp;
+    crate::instructions::round::validate_jupiter_source_binding(
+        &ctx.accounts.market_round,
+        &ctx.accounts.price_policy,
+        &ctx.accounts.jupiter_source_config,
+        &ctx.accounts.attestor_set,
+        ctx.accounts.jupiter_source_config.key(),
+    )?;
     let (_, window_end) = phase_window(&ctx.accounts.market_round, phase)?;
     let deadline = window_end
-        .checked_add(i64::from(ctx.accounts.price_policy.attestation_grace_secs))
+        .checked_add(i64::from(
+            ctx.accounts.jupiter_source_config.attestation_grace_secs,
+        ))
         .ok_or_else(|| error!(ErrorCode::MathOverflow))?;
     require!(now > deadline, ErrorCode::AttestationWindowClosed);
     require!(
@@ -270,7 +298,7 @@ pub fn handle_finalize_price_phase(
         ctx.accounts.round_asset.key(),
         phase,
         &ctx.accounts.attestor_set,
-        &ctx.accounts.price_policy,
+        &ctx.accounts.jupiter_source_config,
     )?;
     let quorum =
         choose_compatible_quorum(&reports, ctx.accounts.market_round.max_attestor_spread_bps)?;
@@ -282,12 +310,14 @@ pub fn handle_finalize_price_phase(
             round_asset.start_price_q9 = quorum.finalized_price_q9;
             round_asset.start_finalized = true;
             round_asset.start_unavailable = false;
+            round_asset.start_evidence_kind = crate::state::EvidenceKind::JupiterAttestationV1;
             round_asset.start_evidence_commitment = evidence_commitment;
         }
         PricePhase::End => {
             round_asset.end_price_q9 = quorum.finalized_price_q9;
             round_asset.end_finalized = true;
             round_asset.end_unavailable = false;
+            round_asset.end_evidence_kind = crate::state::EvidenceKind::JupiterAttestationV1;
             round_asset.end_evidence_commitment = evidence_commitment;
             round_asset.return_q9 =
                 return_q9(round_asset.start_price_q9, round_asset.end_price_q9)?;
@@ -314,10 +344,15 @@ pub struct MarkPricePhaseUnavailable<'info> {
     )]
     pub market_round: Account<'info, MarketRound>,
     #[account(
-        seeds = [PRICE_POLICY_SEED, &market_round.price_policy_version.to_le_bytes()],
+        seeds = [PRICE_POLICY_SEED, &market_round.settlement_policy_version.to_le_bytes()],
         bump = price_policy.bump
     )]
     pub price_policy: Account<'info, PricePolicy>,
+    #[account(
+        seeds = [JUPITER_SOURCE_CONFIG_SEED, &market_round.jupiter_source_config_version.to_le_bytes()],
+        bump = jupiter_source_config.bump
+    )]
+    pub jupiter_source_config: Account<'info, JupiterSourceConfig>,
     #[account(
         seeds = [ATTESTOR_SET_SEED, &market_round.attestor_set_version.to_le_bytes()],
         bump = attestor_set.bump
@@ -331,6 +366,13 @@ pub fn handle_mark_price_phase_unavailable(
     phase: PricePhase,
 ) -> Result<()> {
     let now = Clock::get()?.unix_timestamp;
+    crate::instructions::round::validate_jupiter_source_binding(
+        &ctx.accounts.market_round,
+        &ctx.accounts.price_policy,
+        &ctx.accounts.jupiter_source_config,
+        &ctx.accounts.attestor_set,
+        ctx.accounts.jupiter_source_config.key(),
+    )?;
     let target = match phase {
         PricePhase::Start => ctx.accounts.market_round.start_target_at,
         PricePhase::End => ctx.accounts.market_round.end_target_at,
@@ -373,7 +415,7 @@ pub fn handle_mark_price_phase_unavailable(
         ctx.accounts.round_asset.key(),
         phase,
         &ctx.accounts.attestor_set,
-        &ctx.accounts.price_policy,
+        &ctx.accounts.jupiter_source_config,
     )?;
     require!(
         choose_compatible_quorum(&reports, ctx.accounts.market_round.max_attestor_spread_bps)
@@ -418,7 +460,7 @@ fn read_attestation_summaries(
     round_asset: Pubkey,
     phase: PricePhase,
     attestor_set: &AttestorSet,
-    policy: &PricePolicy,
+    source_config: &JupiterSourceConfig,
 ) -> Result<Vec<AttestationSummary>> {
     require!(accounts.len() <= 3, ErrorCode::InvalidAttestation);
     let mut reports = Vec::with_capacity(accounts.len());
@@ -463,8 +505,8 @@ fn read_attestation_summaries(
             ErrorCode::InvalidAttestationEvidence
         );
         require!(
-            report.accepted_observation_count >= policy.min_accepted_observations
-                && report.unique_source_block_count >= policy.min_unique_source_blocks
+            report.accepted_observation_count >= source_config.min_accepted_observations
+                && report.unique_source_block_count >= source_config.min_unique_source_blocks
                 && report.unique_source_block_count <= report.accepted_observation_count
                 && report.first_source_block_id <= report.last_source_block_id,
             ErrorCode::InvalidAttestationEvidence

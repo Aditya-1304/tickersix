@@ -16,6 +16,7 @@ no-entrypoint = []
 no-log-ix-name = []
 idl-build = ["anchor-lang/idl-build"]
 anchor-debug = []
+pyth-pro = []
 custom-heap = []
 custom-panic = []
 

@@ -55,6 +55,7 @@ fn report_for_program(
 fn accounts() -> RelayAccounts {
     RelayAccounts {
         price_policy: [10; 32],
+        jupiter_source_config: [14; 32],
         market_quality_policy: [11; 32],
         attestor_set: [12; 32],
         relayer: [13; 32],
@@ -215,14 +216,14 @@ fn submit_plan_places_native_verification_before_program_instruction() {
         plan.submission.program_id,
         Address::from(tickersix::ID.to_bytes())
     );
-    assert_eq!(plan.submission.accounts.len(), 10);
+    assert_eq!(plan.submission.accounts.len(), 11);
     assert_eq!(
-        plan.submission.accounts[6].pubkey,
+        plan.submission.accounts[7].pubkey,
         Address::from(plan.price_attestation)
     );
-    assert!(plan.submission.accounts[7].is_signer);
+    assert!(plan.submission.accounts[8].is_signer);
     assert_eq!(
-        plan.submission.accounts[8].pubkey,
+        plan.submission.accounts[9].pubkey,
         Address::from(solana_instructions_sysvar::ID.to_bytes())
     );
     assert_eq!(
@@ -251,6 +252,7 @@ fn finalize_plan_sorts_reports_and_rejects_mixed_phases() {
         &[second.clone(), first.clone()],
         FinalizeAccounts {
             price_policy: [10; 32],
+            jupiter_source_config: [14; 32],
             market_quality_policy: [11; 32],
             attestor_set: [12; 32],
             finalizer: [13; 32],
@@ -262,6 +264,7 @@ fn finalize_plan_sorts_reports_and_rejects_mixed_phases() {
         &[first.clone(), second.clone()],
         FinalizeAccounts {
             price_policy: [10; 32],
+            jupiter_source_config: [14; 32],
             market_quality_policy: [11; 32],
             attestor_set: [12; 32],
             finalizer: [13; 32],
@@ -269,7 +272,7 @@ fn finalize_plan_sorts_reports_and_rejects_mixed_phases() {
     )
     .unwrap();
 
-    assert_eq!(instruction.accounts.len(), 8);
+    assert_eq!(instruction.accounts.len(), 9);
     assert_eq!(instruction.accounts[0].pubkey, Address::from([3; 32]));
     assert_eq!(instruction.accounts, reverse.accounts);
     assert!(build_finalize_price_phase_instruction(
@@ -277,6 +280,7 @@ fn finalize_plan_sorts_reports_and_rejects_mixed_phases() {
         &[first, report(1, 10, 100_010)],
         FinalizeAccounts {
             price_policy: [10; 32],
+            jupiter_source_config: [14; 32],
             market_quality_policy: [11; 32],
             attestor_set: [12; 32],
             finalizer: [13; 32],
@@ -295,6 +299,7 @@ fn finalize_plan_rejects_reports_for_another_program() {
             &[bad_report, report(0, 10, 100_010)],
             FinalizeAccounts {
                 price_policy: [10; 32],
+                jupiter_source_config: [14; 32],
                 market_quality_policy: [11; 32],
                 attestor_set: [12; 32],
                 finalizer: [13; 32],
@@ -334,20 +339,22 @@ fn unavailable_plan_is_explicit_and_has_no_price_payload() {
         [3; 32],
         [2; 32],
         [10; 32],
+        [14; 32],
         [12; 32],
         [13; 32],
         [[9; 32], [10; 32], [11; 32]],
     )
     .unwrap();
 
-    assert_eq!(instruction.accounts.len(), 8);
+    assert_eq!(instruction.accounts.len(), 9);
     assert!(instruction.accounts[0].is_writable);
-    assert!(instruction.accounts[4].is_signer);
+    assert!(instruction.accounts[5].is_signer);
     assert!(build_mark_price_phase_unavailable_instruction(
         2,
         [3; 32],
         [2; 32],
         [10; 32],
+        [14; 32],
         [12; 32],
         [13; 32],
         [[9; 32], [10; 32], [11; 32]],
@@ -379,12 +386,13 @@ fn battle_builders_preserve_mutability_and_reject_malformed_asset_sets() {
     let round = build_finalize_market_round_instruction(
         [21; 32],
         [24; 32],
+        [26; 32],
         [25; 32],
         [22; 32],
         &round_assets,
     )
     .unwrap();
-    assert_eq!(round.accounts.len(), 10);
+    assert_eq!(round.accounts.len(), 11);
     assert!(round.accounts[0].is_writable);
 
     assert!(matches!(

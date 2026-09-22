@@ -3,10 +3,85 @@ use anchor_lang::prelude::*;
 use crate::constants::{ATTESTOR_COUNT, LINEUP_SIZE};
 
 #[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, InitSpace)]
-pub enum PriceSourceKind {
+pub enum SettlementSourceKind {
     JupiterTokenSpotV1,
-    Pyth247IndexV1,
-    VerifiedIssuerOracleV1,
+    PythProVerifiedV1,
+}
+
+/// Compatibility alias retained for the existing Jupiter relay and golden
+/// vectors. New code should use `SettlementSourceKind` so the source family
+/// is explicit at every protocol boundary.
+pub type PriceSourceKind = SettlementSourceKind;
+
+#[derive(Debug, AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, InitSpace)]
+pub enum CompetitionDomain {
+    PublicEquity,
+    PrivateMarket,
+}
+
+#[derive(Debug, AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, InitSpace)]
+pub enum ProviderKind {
+    XStocks,
+    Ondo,
+    BackpackSecurities,
+    PreStocks,
+    Tessera,
+    OtherApproved,
+}
+
+#[derive(Debug, AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, InitSpace)]
+pub enum InstrumentStructureKind {
+    TokenizedPublicEquityExposure,
+    TrackerCertificate,
+    SpvEconomicExposure,
+    LoanParticipationRight,
+    Other,
+}
+
+#[derive(Debug, AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, InitSpace)]
+pub enum LifecycleState {
+    Active,
+    CorporateActionPending,
+    ConversionPending,
+    RedemptionPending,
+    Expiring,
+    Suspended,
+    Closed,
+}
+
+#[derive(Debug, AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, InitSpace)]
+pub enum ComparabilityKind {
+    Unsupported,
+    ContextOnly,
+    CanonicallyComparable,
+}
+
+#[derive(Debug, AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, InitSpace)]
+pub enum EvidenceKind {
+    None,
+    JupiterAttestationV1,
+    PythProVerifiedV1,
+}
+
+/// Immutable identity for a registry representation. A ticker is descriptive
+/// metadata only; settlement and scoring bind to this descriptor's exact mint,
+/// token program, provider, structure, lifecycle, and terms commitments.
+#[derive(AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, InitSpace)]
+pub struct RepresentationDescriptor {
+    pub registry_version: u32,
+    pub asset_id: u16,
+    pub representation_id: u32,
+    pub provider_kind: ProviderKind,
+    pub structure_kind: InstrumentStructureKind,
+    pub scoring_mint: Pubkey,
+    pub token_program: Pubkey,
+    pub decimals: u8,
+    pub lifecycle_state: LifecycleState,
+    pub multiplier_policy_version: u16,
+    pub comparability_kind: ComparabilityKind,
+    pub terms_hash: [u8; 32],
+    pub provider_metadata_hash: [u8; 32],
+    pub enabled: bool,
 }
 
 #[derive(Debug, AnchorSerialize, AnchorDeserialize, Clone, Copy, PartialEq, Eq, InitSpace)]
@@ -71,18 +146,36 @@ pub struct Config {
     pub last_market_round_id: u64,
     pub last_market_round_end_at: i64,
     pub protocol_version: u16,
+    /// Canonical immutable settlement-policy version used by new rounds.
+    pub current_settlement_policy_version: u16,
+    /// Deprecated mirror retained until the Jupiter client/relay migration is
+    /// complete; it is always written together with the canonical field.
     pub current_price_policy_version: u16,
     pub current_market_quality_policy_version: u16,
     pub current_attestor_set_version: u16,
+    pub current_jupiter_source_config_version: u16,
     pub bump: u8,
 }
 
 #[account]
 #[derive(InitSpace)]
-pub struct PricePolicy {
+pub struct SettlementPolicy {
     pub version: u16,
-    pub source_kind: PriceSourceKind,
+    pub source_kind: SettlementSourceKind,
+    pub source_config: Pubkey,
     pub observation_window_secs: u16,
+    pub canonical_policy_hash: [u8; 32],
+    pub bump: u8,
+}
+
+/// Compatibility alias for the pre-abstraction instruction and relay names.
+pub type PricePolicy = SettlementPolicy;
+
+#[account]
+#[derive(InitSpace)]
+pub struct JupiterSourceConfig {
+    pub version: u16,
+    pub attestor_set_version: u16,
     pub attestation_grace_secs: u16,
     pub sample_interval_secs: u16,
     pub max_attestor_spread_bps: u16,
@@ -92,10 +185,25 @@ pub struct PricePolicy {
     pub bump: u8,
 }
 
+#[cfg(feature = "pyth-pro")]
+#[account]
+#[derive(InitSpace)]
+pub struct PythProSourceConfig {
+    pub version: u16,
+    pub verifier_program: Pubkey,
+    pub max_payload_timestamp_delta_us: u64,
+    pub max_feed_age_us: u64,
+    pub max_confidence_bps: u16,
+    pub channel_kind: u8,
+    pub canonical_feed_set_hash: [u8; 32],
+    pub bump: u8,
+}
+
 #[account]
 #[derive(InitSpace)]
 pub struct MarketQualityPolicy {
     pub version: u16,
+    pub competition_domain: CompetitionDomain,
     pub canonical_policy_hash: [u8; 32],
     pub min_eligible_assets: u16,
     pub bump: u8,
@@ -115,9 +223,12 @@ pub struct AttestorSet {
 pub struct AssetRegistryEntry {
     pub registry_version: u32,
     pub asset_id: u16,
-    pub symbol: [u8; 8],
+    pub symbol: [u8; 16],
     pub scoring_mint: Pubkey,
+    /// Legacy issuer discriminator retained for old registry clients. The
+    /// descriptor is authoritative for new round admission.
     pub issuer_kind: u8,
+    pub descriptor: RepresentationDescriptor,
     pub active: bool,
     pub bump: u8,
 }
@@ -127,6 +238,13 @@ pub struct AssetRegistryEntry {
 pub struct MarketRound {
     pub round_id: u64,
     pub registry_version: u32,
+    pub competition_domain: CompetitionDomain,
+    pub settlement_policy_version: u16,
+    pub settlement_source_kind: SettlementSourceKind,
+    pub settlement_source_config: Pubkey,
+    pub jupiter_source_config_version: u16,
+    /// Deprecated Jupiter compatibility fields used by existing report
+    /// messages and off-chain consumers during the Slice 1 migration.
     pub price_policy_version: u16,
     pub market_quality_policy_version: u16,
     pub attestor_set_version: u16,
@@ -161,17 +279,24 @@ pub struct RoundAsset {
     pub market_round: Pubkey,
     pub asset_id: u16,
     pub scoring_mint: Pubkey,
+    pub token_program: Pubkey,
+    pub representation_id: u32,
+    pub provider_kind: ProviderKind,
     pub issuer_kind: u8,
+    pub settlement_source_kind: SettlementSourceKind,
     pub price_source_kind: PriceSourceKind,
+    pub settlement_policy_version: u16,
     pub price_policy_version: u16,
     pub market_quality_policy_version: u16,
     pub start_price_q9: i64,
     pub start_finalized: bool,
     pub start_unavailable: bool,
+    pub start_evidence_kind: EvidenceKind,
     pub start_evidence_commitment: [u8; 32],
     pub end_price_q9: i64,
     pub end_finalized: bool,
     pub end_unavailable: bool,
+    pub end_evidence_kind: EvidenceKind,
     pub end_evidence_commitment: [u8; 32],
     pub return_q9: i64,
     pub available: bool,

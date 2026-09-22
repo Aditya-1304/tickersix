@@ -14,6 +14,10 @@ pub enum ErrorCode {
     InvalidPolicyVersion,
     #[msg("Policy parameters must be calibrated and bounded")]
     UncalibratedPolicy,
+    #[msg("Settlement source is not enabled in this protocol build")]
+    UnsupportedSettlementSource,
+    #[msg("Settlement policy and source configuration are not bound together")]
+    SourceConfigMismatch,
     #[msg("Attestor set must contain three unique keys and a two-report quorum")]
     InvalidAttestorSet,
     #[msg("Asset identifier is outside the supported registry range")]
