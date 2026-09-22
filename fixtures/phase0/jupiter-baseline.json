@@ -1,0 +1,7 @@
+{
+  "eligible_asset_count": 10,
+  "attestor_count": 3,
+  "sample_interval_secs": 5,
+  "observation_window_secs": 60,
+  "provider_limit_milli_rps": 1000
+}

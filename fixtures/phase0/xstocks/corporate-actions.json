@@ -1,0 +1,11 @@
+{
+  "page": {
+    "currentPage": 1,
+    "pageSize": 100,
+    "totalPages": 1,
+    "totalNodes": 0,
+    "hasNextPage": false,
+    "hasPreviousPage": false
+  },
+  "nodes": []
+}

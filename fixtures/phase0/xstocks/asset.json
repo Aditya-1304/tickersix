@@ -1,0 +1,39 @@
+{
+  "id": "365fea03-d6ef-41fc-8a43-08d014e5e4c7",
+  "name": "SP500 xStock",
+  "symbol": "SPYx",
+  "isin": "CH1436219716",
+  "underlying": {
+    "symbol": "SPY",
+    "isin": "US78462F1030",
+    "type": null,
+    "currency": "USD",
+    "listingCountry": "US"
+  },
+  "description": "SP500 xStock",
+  "logo": "https://xstocks-metadata.backed.fi/logos/tokens/SPYx.png",
+  "isTradingHalted": false,
+  "trading": null,
+  "deployments": [
+    {
+      "address": "XsoCS1TfEyfFhfvj8EtZ528L3CaKBDBRqRapnBbDF2W",
+      "network": "Solana",
+      "supportsAtomicSwaps": false,
+      "stablecoins": [
+        {
+          "symbol": "USDC",
+          "currency": "USD",
+          "network": "Solana",
+          "address": "",
+          "decimals": 6,
+          "issuance": true,
+          "redemption": true,
+          "supportsAtomicSwaps": true,
+          "solanaTokenProgram": "TokenProgram"
+        }
+      ]
+    }
+  ],
+  "underlyingSymbol": "SPY",
+  "underlyingIsin": "US78462F1030"
+}

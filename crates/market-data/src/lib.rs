@@ -21,6 +21,12 @@ use reqwest::StatusCode;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::value::RawValue;
 
+pub mod baseline;
+pub mod xstocks;
+
+pub use baseline::*;
+pub use xstocks::*;
+
 /// Jupiter documents a maximum of 50 comma-separated price IDs per request.
 pub const MAX_PRICE_REQUEST_MINTS: usize = 50;
 pub const MAX_TOKEN_QUERY_MINTS: usize = 100;
@@ -1087,14 +1093,8 @@ pub fn validate_batched_sampling_plan(
         return Err(SamplingPlanError::ZeroProviderLimit);
     }
 
-    let aggregate_milli_rps = (attestor_count as u128)
-        .checked_mul(requests_per_sample as u128)
-        .and_then(|value| value.checked_mul(1_000))
-        .and_then(|value| value.checked_add(u128::from(sample_interval_secs) - 1))
-        .and_then(|value| value.checked_div(u128::from(sample_interval_secs)))
-        .ok_or(SamplingPlanError::Overflow)?;
     let aggregate_milli_rps =
-        u64::try_from(aggregate_milli_rps).map_err(|_| SamplingPlanError::Overflow)?;
+        sampling_plan_rate_milli_rps(attestor_count, requests_per_sample, sample_interval_secs)?;
     if aggregate_milli_rps > provider_limit_milli_rps {
         return Err(SamplingPlanError::ProviderRateLimitExceeded {
             aggregate_milli_rps,
@@ -1103,6 +1103,33 @@ pub fn validate_batched_sampling_plan(
     }
 
     Ok(())
+}
+
+/// Calculates the aggregate request rate for a batched sampling plan without
+/// applying a provider limit. Keeping this arithmetic public lets the Phase 0
+/// baseline report the exact measured rate alongside its pass/fail decision.
+pub fn sampling_plan_rate_milli_rps(
+    attestor_count: usize,
+    requests_per_sample: usize,
+    sample_interval_secs: u64,
+) -> Result<u64, SamplingPlanError> {
+    if attestor_count == 0 {
+        return Err(SamplingPlanError::ZeroAttestors);
+    }
+    if requests_per_sample == 0 {
+        return Err(SamplingPlanError::ZeroRequests);
+    }
+    if sample_interval_secs == 0 {
+        return Err(SamplingPlanError::ZeroInterval);
+    }
+
+    let aggregate_milli_rps = (attestor_count as u128)
+        .checked_mul(requests_per_sample as u128)
+        .and_then(|value| value.checked_mul(1_000))
+        .and_then(|value| value.checked_add(u128::from(sample_interval_secs) - 1))
+        .and_then(|value| value.checked_div(u128::from(sample_interval_secs)))
+        .ok_or(SamplingPlanError::Overflow)?;
+    u64::try_from(aggregate_milli_rps).map_err(|_| SamplingPlanError::Overflow)
 }
 
 /// Returns deterministic millisecond offsets inside each sampling interval.

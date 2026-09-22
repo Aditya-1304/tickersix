@@ -8,15 +8,17 @@ use std::{
     collections::BTreeSet,
     env,
     error::Error,
-    fs::{create_dir_all, File, OpenOptions},
+    fs::{create_dir_all, read_to_string, File, OpenOptions},
     io::{BufRead, BufReader, Write},
     path::Path,
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use market_data::{
-    stagger_offsets_millis, summarize_observation_window, validate_sampling_plan, JupiterClient,
-    MarketDataObservation, PriceBatch,
+    evaluate_xstocks_baseline_with_verified_token_program, stagger_offsets_millis,
+    summarize_observation_window, validate_jupiter_baseline, validate_sampling_plan,
+    JupiterBaselineConfig, JupiterClient, MarketDataObservation, PriceBatch,
+    XStocksBaselineSnapshot, XStocksClient,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPoolOptions;
@@ -58,6 +60,25 @@ struct RecorderLine<'a> {
     error: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+struct Phase0Slice1Report {
+    slice: &'static str,
+    jupiter: market_data::JupiterBaselineAssessment,
+    xstocks: XStocksBaselineSnapshot,
+}
+
+#[derive(Debug, Serialize)]
+struct JupiterSmokeReport {
+    api_key_configured: bool,
+    batch: PriceBatch,
+}
+
+#[derive(Debug, Deserialize)]
+struct VerifiedTokenProgramFixture {
+    owner: String,
+    token_program: String,
+}
+
 #[derive(Debug)]
 struct RecorderConfig {
     api_key: Option<String>,
@@ -77,6 +98,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Some("record-market-data") => record_market_data().await?,
         Some("record-token-metadata") => record_token_metadata().await?,
         Some("analyze-market-data") => analyze_market_data()?,
+        Some("phase0-slice1-gate") => run_phase0_slice1_gate()?,
+        Some("jupiter-smoke") => run_jupiter_smoke().await?,
+        Some("xstocks-smoke") => run_xstocks_smoke().await?,
         Some("attestor-run") => attestor::run().await?,
         Some("api-serve") => api::serve_from_env().await?,
         Some("ranked-match") => run_ranked_match().await?,
@@ -99,6 +123,99 @@ async fn main() -> Result<(), Box<dyn Error>> {
         _ => print_usage(),
     }
 
+    Ok(())
+}
+
+/// Runs the offline Phase 0 Slice 0.1 gate against committed schema fixtures.
+///
+/// Fixture validation proves that the baseline policy and parser contracts are
+/// executable and reviewable without pretending that fixture data is fresh
+/// provider evidence. The live xStocks smoke command below is intentionally a
+/// separate read-only operation for that operational claim.
+fn run_phase0_slice1_gate() -> Result<(), Box<dyn Error>> {
+    let fixture_dir = env::args()
+        .nth(2)
+        .unwrap_or_else(|| "fixtures/phase0".to_owned());
+    let expected_symbol = env::args().nth(3).unwrap_or_else(|| "SPYx".to_owned());
+    let fixture_root = Path::new(&fixture_dir);
+    let xstocks_root = fixture_root.join("xstocks");
+
+    let jupiter_config: JupiterBaselineConfig =
+        serde_json::from_str(&read_to_string(fixture_root.join("jupiter-baseline.json"))?)?;
+    let jupiter = validate_jupiter_baseline(jupiter_config)?;
+    let verified_token_program: VerifiedTokenProgramFixture = serde_json::from_str(
+        &read_to_string(xstocks_root.join("solana-token-program.json"))?,
+    )?;
+    if verified_token_program.owner != market_data::SPL_TOKEN_2022_PROGRAM_ID
+        || verified_token_program.token_program != "Token2022Program"
+    {
+        return Err("xStocks fixture token-program owner is not Token-2022".into());
+    }
+    let xstocks = evaluate_xstocks_baseline_with_verified_token_program(
+        &read_to_string(xstocks_root.join("asset.json"))?,
+        &read_to_string(xstocks_root.join("price-data.json"))?,
+        &read_to_string(xstocks_root.join("multiplier.json"))?,
+        &read_to_string(xstocks_root.join("corporate-actions.json"))?,
+        &expected_symbol,
+        &verified_token_program.token_program,
+    )?;
+
+    let report = Phase0Slice1Report {
+        slice: "phase0.1",
+        jupiter,
+        xstocks,
+    };
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+/// Performs a live, unauthenticated, read-only xStocks contract smoke test.
+///
+/// No wallet, signing key, transaction, or settlement state is touched. The
+/// optional base URL exists solely to make the command testable against a
+/// controlled mirror while production defaults to the documented public API.
+async fn run_xstocks_smoke() -> Result<(), Box<dyn Error>> {
+    let symbol = env::args()
+        .nth(2)
+        .ok_or("usage: cargo run -p backend -- xstocks-smoke <symbol> [network]")?;
+    let network = env::args().nth(3).unwrap_or_else(|| "Solana".to_owned());
+    let base_url = env::var("TICKERSIX_XSTOCKS_BASE_URL")
+        .unwrap_or_else(|_| market_data::DEFAULT_XSTOCKS_BASE_URL.to_owned());
+    let solana_rpc_url = env::var("TICKERSIX_SOLANA_RPC_URL")
+        .unwrap_or_else(|_| market_data::DEFAULT_SOLANA_RPC_URL.to_owned());
+    let client = XStocksClient::with_base_url_and_rpc_url(base_url, solana_rpc_url)?;
+    let snapshot = client.fetch_baseline(&symbol, &network).await?;
+    println!("{}", serde_json::to_string_pretty(&snapshot)?);
+    Ok(())
+}
+
+/// Performs one read-only Jupiter Price V3 batch request for exact registry
+/// mints. The command reports whether an API key was configured but never
+/// prints the key itself or turns a provider response into settlement state.
+async fn run_jupiter_smoke() -> Result<(), Box<dyn Error>> {
+    let mints = env::args()
+        .nth(2)
+        .ok_or("usage: cargo run -p backend -- jupiter-smoke <mint[,mint...]>")?
+        .split(',')
+        .map(str::trim)
+        .filter(|mint| !mint.is_empty())
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    if mints.is_empty() {
+        return Err("jupiter-smoke requires at least one mint".into());
+    }
+    let api_key = env::var("TICKERSIX_JUPITER_API_KEY").ok();
+    let base_url = env::var("TICKERSIX_JUPITER_BASE_URL")
+        .unwrap_or_else(|_| market_data::DEFAULT_JUPITER_BASE_URL.to_owned());
+    let client = JupiterClient::with_base_url(base_url, api_key.clone())?;
+    let batch = client.fetch_prices(&mints, now_unix_ms()?).await?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&JupiterSmokeReport {
+            api_key_configured: api_key.is_some(),
+            batch,
+        })?
+    );
     Ok(())
 }
 
@@ -393,9 +510,13 @@ fn print_usage() {
     println!(
         r#"Usage: cargo run -p backend -- record-market-data
 Metadata: cargo run -p backend -- record-token-metadata
+Phase 0 Slice 0.1 gate: cargo run -p backend -- phase0-slice1-gate fixtures/phase0 SPYx
+Live Jupiter smoke: cargo run -p backend -- jupiter-smoke <mint[,mint...]>
+Live xStocks smoke: cargo run -p backend -- xstocks-smoke SPYx Solana
 
 Required: TICKERSIX_MARKET_DATA_MINTS=mint_a,mint_b,...
 Optional: TICKERSIX_JUPITER_API_KEY, TICKERSIX_MARKET_DATA_OUTPUT,
+TICKERSIX_XSTOCKS_BASE_URL, TICKERSIX_SOLANA_RPC_URL,
 TICKERSIX_MARKET_DATA_ATTESTOR_ID, TICKERSIX_MARKET_DATA_ATTESTOR_INDEX,
 TICKERSIX_MARKET_DATA_ITERATIONS, TICKERSIX_MARKET_DATA_SAMPLE_INTERVAL_SECS
 
