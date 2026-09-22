@@ -474,7 +474,28 @@ pub mod tickersix {
         instructions::price::handle_finalize_price_phase(ctx, phase)
     }
 
+    /// Finalizes a Jupiter Token Spot phase using the native Ed25519-attested
+    /// reports already persisted for this RoundAsset. The explicit name keeps
+    /// the permanent Jupiter path distinguishable from future source-specific
+    /// finalizers in transaction logs and proof tooling.
+    pub fn finalize_jupiter_price_phase(
+        ctx: Context<FinalizePricePhase>,
+        phase: PricePhase,
+    ) -> Result<()> {
+        instructions::price::handle_finalize_price_phase(ctx, phase)
+    }
+
     pub fn mark_price_phase_unavailable(
+        ctx: Context<MarkPricePhaseUnavailable>,
+        phase: PricePhase,
+    ) -> Result<()> {
+        instructions::price::handle_mark_price_phase_unavailable(ctx, phase)
+    }
+
+    /// Marks a Jupiter phase unavailable after its deadline when no compatible
+    /// attestor quorum exists. No alternate source or replacement price is
+    /// accepted by this fail-closed transition.
+    pub fn mark_jupiter_price_phase_unavailable(
         ctx: Context<MarkPricePhaseUnavailable>,
         phase: PricePhase,
     ) -> Result<()> {

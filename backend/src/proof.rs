@@ -73,11 +73,25 @@ pub enum VoidReason {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MarketRoundProof {
     pub round_id: u64,
+    /// Canonical PDA for the frozen market round. Numeric ids are retained for
+    /// indexing, while the PDA is the public chain identity used for audit.
+    #[serde(default)]
+    pub market_round_pubkey: String,
     pub registry_version: u32,
     pub price_policy_version: u16,
     pub quality_policy_version: u16,
     pub attestor_set_version: u16,
+    #[serde(default = "default_jupiter_source_kind")]
+    pub source_kind: SourceKind,
+    /// Signature of the transaction that finalized the market round. The
+    /// public proof must bind this to the transaction list below.
+    #[serde(default)]
+    pub settlement_transaction_signature: String,
     pub state: RoundState,
+}
+
+fn default_jupiter_source_kind() -> SourceKind {
+    SourceKind::JupiterTokenSpotV1
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -123,6 +137,13 @@ pub struct RoundAssetProof {
     pub issuer: String,
     /// Exact issuer-approved scoring mint, never a display or fallback mint.
     pub scoring_mint: String,
+    /// Canonical PDA and frozen registry representation/provider metadata.
+    #[serde(default)]
+    pub round_asset_pubkey: String,
+    #[serde(default)]
+    pub representation_id: u32,
+    #[serde(default)]
+    pub provider: String,
     pub source_kind: SourceKind,
     pub price_policy_version: u16,
     pub quality_policy_version: u16,
@@ -136,14 +157,32 @@ pub struct RoundAssetProof {
 pub struct BattleProof {
     pub battle_id: u64,
     pub market_round_id: u64,
+    #[serde(default)]
+    pub battle_pubkey: String,
+    #[serde(default)]
+    pub market_round_pubkey: String,
     pub side_a_lineup: Vec<u16>,
     pub side_a_captain: Option<u16>,
     pub side_a_score_q9: Option<i64>,
     pub side_b_lineup: Vec<u16>,
     pub side_b_captain: Option<u16>,
     pub side_b_score_q9: Option<i64>,
+    pub side_a_participant: ParticipantProof,
+    pub side_b_participant: ParticipantProof,
     pub result: BattleResult,
     pub void_reason: VoidReason,
+}
+
+/// Public lifecycle evidence for one Battle participant. Commitment
+/// preimages and salts never enter this structure; only the transaction
+/// signatures and timestamps needed to audit the commit/reveal sequence do.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ParticipantProof {
+    pub wallet: String,
+    pub commit_transaction_signature: Option<String>,
+    pub commit_timestamp_unix_secs: Option<i64>,
+    pub reveal_transaction_signature: Option<String>,
+    pub reveal_timestamp_unix_secs: Option<i64>,
 }
 
 /// Input emitted by a chain indexer after it has fetched the authoritative
@@ -185,7 +224,9 @@ pub enum ProofError {
     ScoreMismatch,
     BattleRoundMismatch,
     BattleNotFinalized,
+    MissingBattleTransaction,
     ChainStateMismatch,
+    MissingSettlementTransaction,
     Io(String),
     Json(String),
 }
@@ -207,7 +248,13 @@ impl fmt::Display for ProofError {
             Self::ScoreMismatch => "proof score does not match the canonical lineup formula",
             Self::BattleRoundMismatch => "proof Battle belongs to another market round",
             Self::BattleNotFinalized => "proof Battle result is not terminal",
+            Self::MissingBattleTransaction => {
+                "proof Battle lifecycle is missing a referenced transaction"
+            }
             Self::ChainStateMismatch => "indexed proof differs from reconciled chain state",
+            Self::MissingSettlementTransaction => {
+                "proof is missing the finalized settlement transaction"
+            }
             Self::Io(error) | Self::Json(error) => error,
         };
         formatter.write_str(message)
@@ -246,6 +293,24 @@ impl ProofSnapshot {
 
         let mut seen_assets = Vec::with_capacity(self.round_assets.len());
         let source_kind = self.round_assets[0].source_kind;
+        if self.market_round.market_round_pubkey.trim().is_empty() {
+            return Err(ProofError::InvalidAssetIdentity);
+        }
+        if self.market_round.source_kind != source_kind {
+            return Err(ProofError::PolicyMismatch);
+        }
+        if self
+            .market_round
+            .settlement_transaction_signature
+            .trim()
+            .is_empty()
+            || !self
+                .transaction_signatures
+                .iter()
+                .any(|signature| signature == &self.market_round.settlement_transaction_signature)
+        {
+            return Err(ProofError::MissingSettlementTransaction);
+        }
         for asset in &self.round_assets {
             if !seen_assets
                 .iter()
@@ -257,6 +322,8 @@ impl ProofSnapshot {
             if asset.symbol.trim().is_empty()
                 || asset.issuer.trim().is_empty()
                 || asset.scoring_mint.trim().is_empty()
+                || asset.round_asset_pubkey.trim().is_empty()
+                || asset.provider.trim().is_empty()
             {
                 return Err(ProofError::InvalidAssetIdentity);
             }
@@ -290,7 +357,13 @@ impl ProofSnapshot {
         }
 
         if let Some(battle) = &self.battle {
-            validate_battle(battle, self.market_round.round_id, &self.round_assets)?;
+            validate_battle(
+                battle,
+                self.market_round.round_id,
+                &self.market_round.market_round_pubkey,
+                &self.round_assets,
+                &self.transaction_signatures,
+            )?;
         }
         Ok(())
     }
@@ -394,10 +467,52 @@ fn validate_phase(phase: &PhaseProof, source_kind: SourceKind) -> Result<(), Pro
 fn validate_battle(
     battle: &BattleProof,
     round_id: u64,
+    market_round_pubkey: &str,
     assets: &[RoundAssetProof],
+    transaction_signatures: &[String],
 ) -> Result<(), ProofError> {
     if battle.market_round_id != round_id {
         return Err(ProofError::BattleRoundMismatch);
+    }
+    if battle.battle_pubkey.trim().is_empty()
+        || battle.market_round_pubkey.trim().is_empty()
+        || battle.market_round_pubkey != market_round_pubkey
+    {
+        return Err(ProofError::InvalidAssetIdentity);
+    }
+    for participant in [&battle.side_a_participant, &battle.side_b_participant] {
+        if participant.wallet.trim().is_empty() {
+            return Err(ProofError::InvalidAssetIdentity);
+        }
+    }
+    if matches!(
+        battle.result,
+        BattleResult::PlayerA | BattleResult::PlayerB | BattleResult::Draw
+    ) {
+        for participant in [&battle.side_a_participant, &battle.side_b_participant] {
+            if participant.commit_transaction_signature.is_none()
+                || participant.commit_timestamp_unix_secs.is_none()
+                || participant.reveal_transaction_signature.is_none()
+                || participant.reveal_timestamp_unix_secs.is_none()
+                || participant.commit_timestamp_unix_secs > participant.reveal_timestamp_unix_secs
+            {
+                return Err(ProofError::BattleNotFinalized);
+            }
+            for signature in [
+                participant.commit_transaction_signature.as_ref(),
+                participant.reveal_transaction_signature.as_ref(),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if !transaction_signatures
+                    .iter()
+                    .any(|known| known == signature)
+                {
+                    return Err(ProofError::MissingBattleTransaction);
+                }
+            }
+        }
     }
     validate_lineup(&battle.side_a_lineup, battle.side_a_captain, assets)?;
     validate_lineup(&battle.side_b_lineup, battle.side_b_captain, assets)?;
@@ -530,8 +645,9 @@ fn format_return_q9(value: i64) -> String {
     )
 }
 
-/// Loads a reconciled proof snapshot from disk and serves two read-only routes:
-/// `/proof/round/{round_id}` and `/proof/battle/{battle_id}`.
+/// Loads a reconciled proof snapshot from disk and serves read-only proof
+/// routes. The `/v1/.../{pubkey}/proof` routes are the public API contract;
+/// numeric legacy routes remain available for local fixture compatibility.
 pub fn serve_from_file(path: impl AsRef<Path>, bind_address: &str) -> Result<(), ProofError> {
     let snapshot: ProofSnapshot = serde_json::from_str(
         &fs::read_to_string(path).map_err(|error| ProofError::Io(error.to_string()))?,
@@ -568,7 +684,9 @@ fn respond(stream: &mut TcpStream, proof: &PublicProof, body: &[u8]) -> Result<(
         .as_ref()
         .map(|battle| format!("/proof/battle/{}", battle.battle_id));
     let (status, payload): (&str, &[u8]) = if request_line.starts_with("GET ")
-        && (path == expected_round || expected_battle.as_deref() == Some(path))
+        && (proof_path_matches(path, proof)
+            || path == expected_round
+            || expected_battle.as_deref() == Some(path))
     {
         ("200 OK", body)
     } else if request_line.starts_with("GET ") {
@@ -587,6 +705,21 @@ fn respond(stream: &mut TcpStream, proof: &PublicProof, body: &[u8]) -> Result<(
         .write_all(header.as_bytes())
         .and_then(|_| stream.write_all(payload))
         .map_err(|error| ProofError::Io(error.to_string()))
+}
+
+fn proof_path_matches(path: &str, proof: &PublicProof) -> bool {
+    if path
+        == format!(
+            "/v1/market-rounds/{}/proof",
+            proof.market_round.market_round_pubkey
+        )
+    {
+        return true;
+    }
+    proof
+        .battle
+        .as_ref()
+        .is_some_and(|battle| path == format!("/v1/battles/{}/proof", battle.battle_pubkey))
 }
 
 #[cfg(test)]
@@ -638,10 +771,13 @@ mod tests {
         ProofSnapshot {
             market_round: MarketRoundProof {
                 round_id: 7,
+                market_round_pubkey: "MarketRoundPda".to_owned(),
                 registry_version: 1,
                 price_policy_version: 1,
                 quality_policy_version: 1,
                 attestor_set_version: 1,
+                source_kind: SourceKind::JupiterTokenSpotV1,
+                settlement_transaction_signature: "settlement-signature".to_owned(),
                 state: RoundState::Finalized,
             },
             round_assets: vec![RoundAssetProof {
@@ -649,6 +785,9 @@ mod tests {
                 symbol: "ASSET".to_owned(),
                 issuer: "Issuer".to_owned(),
                 scoring_mint: "ExactMint".to_owned(),
+                round_asset_pubkey: "RoundAssetPda".to_owned(),
+                representation_id: 1,
+                provider: "Jupiter".to_owned(),
                 source_kind: SourceKind::JupiterTokenSpotV1,
                 price_policy_version: 1,
                 quality_policy_version: 1,
@@ -658,7 +797,7 @@ mod tests {
                 display_return: Some("10.00%".to_owned()),
             }],
             battle: None,
-            transaction_signatures: vec!["signature".to_owned()],
+            transaction_signatures: vec!["signature".to_owned(), "settlement-signature".to_owned()],
             indexed_slot: 42,
             chain_slot: 42,
             chain_reconciled: true,
@@ -698,6 +837,7 @@ mod tests {
     #[test]
     fn pyth_proof_requires_pyth_evidence_and_uses_the_devnet_label() {
         let mut proof = snapshot();
+        proof.market_round.source_kind = SourceKind::PythProVerifiedV1;
         proof.round_assets[0].source_kind = SourceKind::PythProVerifiedV1;
         proof.round_assets[0].start = pyth_phase(100_000_000_000);
         proof.round_assets[0].end = pyth_phase(110_000_000_000);
@@ -707,11 +847,111 @@ mod tests {
         );
 
         let mut missing = snapshot();
+        missing.market_round.source_kind = SourceKind::PythProVerifiedV1;
         missing.round_assets[0].source_kind = SourceKind::PythProVerifiedV1;
         missing.round_assets[0].start = PhaseProof {
             pyth_evidence: None,
             ..phase(100_000_000_000)
         };
         assert_eq!(missing.validate(), Err(ProofError::InvalidReportSet));
+    }
+
+    #[test]
+    fn jupiter_proof_requires_frozen_source_and_settlement_transaction() {
+        let mut missing_transaction = snapshot();
+        missing_transaction
+            .market_round
+            .settlement_transaction_signature
+            .clear();
+        assert_eq!(
+            missing_transaction.validate(),
+            Err(ProofError::MissingSettlementTransaction)
+        );
+
+        let mut mismatched_source = snapshot();
+        mismatched_source.market_round.source_kind = SourceKind::PythProVerifiedV1;
+        assert_eq!(
+            mismatched_source.validate(),
+            Err(ProofError::PolicyMismatch)
+        );
+    }
+
+    #[test]
+    fn proof_route_uses_the_public_battle_and_market_round_paths() {
+        let proof = snapshot().into_public().unwrap();
+
+        assert!(proof_path_matches(
+            "/v1/market-rounds/MarketRoundPda/proof",
+            &proof
+        ));
+        assert!(!proof_path_matches("/v1/battles/unknown/proof", &proof));
+    }
+
+    #[test]
+    fn jupiter_proof_validates_the_complete_battle_lifecycle() {
+        let mut proof = snapshot();
+        proof.round_assets = (1..=6)
+            .map(|asset_id| {
+                let end_price = if asset_id == 1 {
+                    110_000_000_000
+                } else {
+                    100_000_000_000
+                };
+                RoundAssetProof {
+                    asset_id,
+                    symbol: format!("ASSET{asset_id}"),
+                    issuer: "Issuer".to_owned(),
+                    scoring_mint: format!("Mint{asset_id}"),
+                    round_asset_pubkey: format!("RoundAssetPda{asset_id}"),
+                    representation_id: u32::from(asset_id),
+                    provider: "Jupiter".to_owned(),
+                    source_kind: SourceKind::JupiterTokenSpotV1,
+                    price_policy_version: 1,
+                    quality_policy_version: 1,
+                    start: phase(100_000_000_000),
+                    end: phase(end_price),
+                    return_q9: Some(if asset_id == 1 { 100_000_000 } else { 0 }),
+                    display_return: None,
+                }
+            })
+            .collect();
+        proof.transaction_signatures.extend([
+            "commit-a".to_owned(),
+            "reveal-a".to_owned(),
+            "commit-b".to_owned(),
+            "reveal-b".to_owned(),
+        ]);
+        proof.battle = Some(BattleProof {
+            battle_id: 8,
+            market_round_id: 7,
+            battle_pubkey: "BattlePda".to_owned(),
+            market_round_pubkey: "MarketRoundPda".to_owned(),
+            side_a_lineup: vec![1, 2, 3, 4, 5, 6],
+            side_a_captain: Some(1),
+            side_a_score_q9: Some(28_571_428),
+            side_b_lineup: vec![1, 2, 3, 4, 5, 6],
+            side_b_captain: Some(2),
+            side_b_score_q9: Some(14_285_714),
+            side_a_participant: ParticipantProof {
+                wallet: "WalletA".to_owned(),
+                commit_transaction_signature: Some("commit-a".to_owned()),
+                commit_timestamp_unix_secs: Some(120),
+                reveal_transaction_signature: Some("reveal-a".to_owned()),
+                reveal_timestamp_unix_secs: Some(125),
+            },
+            side_b_participant: ParticipantProof {
+                wallet: "WalletB".to_owned(),
+                commit_transaction_signature: Some("commit-b".to_owned()),
+                commit_timestamp_unix_secs: Some(120),
+                reveal_transaction_signature: Some("reveal-b".to_owned()),
+                reveal_timestamp_unix_secs: Some(125),
+            },
+            result: BattleResult::PlayerA,
+            void_reason: VoidReason::None,
+        });
+
+        let public = proof.into_public().unwrap();
+        assert_eq!(public.source_trust_label, JUPITER_SETTLEMENT_TRUST_LABEL);
+        assert_eq!(public.battle.unwrap().result, BattleResult::PlayerA);
     }
 }

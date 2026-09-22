@@ -10,6 +10,15 @@ use std::{error::Error, fmt, fs, path::Path};
 
 use serde::{Deserialize, Serialize};
 
+/// Phase 2 Slice 1 only dispatches the permanent Jupiter baseline. Pyth is
+/// represented so snapshots can be rejected explicitly until its Gate 0B
+/// verification path is enabled in Slice 2.
+pub use crate::proof::SourceKind as SettlementSourceKind;
+
+fn default_settlement_source() -> SettlementSourceKind {
+    SettlementSourceKind::JupiterTokenSpotV1
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Phase {
@@ -60,6 +69,10 @@ pub struct BattleSettlementState {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SettlementSnapshot {
+    /// Frozen source selected by the market round. A source-agnostic planner
+    /// is unsafe because it can route a valid snapshot to the wrong verifier.
+    #[serde(default = "default_settlement_source")]
+    pub source_kind: SettlementSourceKind,
     pub now_unix_secs: i64,
     pub round_state: RoundState,
     pub rated_battle_count: u32,
@@ -72,8 +85,8 @@ pub struct SettlementSnapshot {
 #[serde(tag = "action", rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum SettlementAction {
     AdvanceRoundToSettling,
-    FinalizePhase { asset_id: u16, phase: Phase },
-    MarkPhaseUnavailable { asset_id: u16, phase: Phase },
+    FinalizeJupiterPhase { asset_id: u16, phase: Phase },
+    MarkJupiterPhaseUnavailable { asset_id: u16, phase: Phase },
     ForfeitBattle { battle_id: u64 },
     VoidBattlePriceUnavailable { battle_id: u64 },
     SettleSideScore { battle_id: u64, side_index: u8 },
@@ -83,6 +96,7 @@ pub enum SettlementAction {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SettlementError {
+    UnsupportedSource,
     DuplicateAsset,
     DuplicateBattle,
     InvalidBattleAsset,
@@ -93,6 +107,9 @@ pub enum SettlementError {
 impl fmt::Display for SettlementError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
+            Self::UnsupportedSource => {
+                "settlement source is not enabled by the Jupiter Phase 2 slice"
+            }
             Self::DuplicateAsset => "settlement snapshot contains a duplicate asset",
             Self::DuplicateBattle => "settlement snapshot contains a duplicate Battle",
             Self::InvalidBattleAsset => "Battle references an invalid or duplicate asset",
@@ -206,9 +223,9 @@ fn plan_phase(
         return;
     }
     if has_compatible_quorum {
-        actions.push(SettlementAction::FinalizePhase { asset_id, phase });
+        actions.push(SettlementAction::FinalizeJupiterPhase { asset_id, phase });
     } else {
-        actions.push(SettlementAction::MarkPhaseUnavailable { asset_id, phase });
+        actions.push(SettlementAction::MarkJupiterPhaseUnavailable { asset_id, phase });
     }
 }
 
@@ -223,6 +240,9 @@ fn all_assets_available(asset_ids: &[u16], assets: &[AssetSettlementState]) -> b
 }
 
 fn validate_snapshot(snapshot: &SettlementSnapshot) -> Result<(), SettlementError> {
+    if snapshot.source_kind != SettlementSourceKind::JupiterTokenSpotV1 {
+        return Err(SettlementError::UnsupportedSource);
+    }
     let mut asset_ids = Vec::with_capacity(snapshot.assets.len());
     for asset in &snapshot.assets {
         if asset_ids.contains(&asset.asset_id) {
@@ -307,6 +327,7 @@ mod tests {
     #[test]
     fn planner_is_deterministic_and_emits_no_action_for_resolved_state() {
         let snapshot = SettlementSnapshot {
+            source_kind: SettlementSourceKind::JupiterTokenSpotV1,
             now_unix_secs: 40,
             round_state: RoundState::Finalized,
             rated_battle_count: 1,
@@ -327,6 +348,7 @@ mod tests {
         failed_asset.end_deadline = 20;
         failed_asset.end_has_compatible_quorum = false;
         let snapshot = SettlementSnapshot {
+            source_kind: SettlementSourceKind::JupiterTokenSpotV1,
             now_unix_secs: 40,
             round_state: RoundState::Settling,
             rated_battle_count: 1,
@@ -342,12 +364,33 @@ mod tests {
         assert_eq!(
             plan_settlement(&snapshot).unwrap(),
             vec![
-                SettlementAction::MarkPhaseUnavailable {
+                SettlementAction::MarkJupiterPhaseUnavailable {
                     asset_id: 1,
                     phase: Phase::End
                 },
                 SettlementAction::VoidBattlePriceUnavailable { battle_id: 1 }
             ]
+        );
+    }
+
+    #[test]
+    fn planner_fails_closed_for_sources_not_enabled_in_jupiter_slice() {
+        let snapshot = SettlementSnapshot {
+            source_kind: SettlementSourceKind::PythProVerifiedV1,
+            now_unix_secs: 40,
+            round_state: RoundState::Settling,
+            rated_battle_count: 1,
+            resolved_battle_count: 1,
+            assets: (1..=6).map(asset).collect(),
+            battles: vec![BattleSettlementState {
+                result_pending: false,
+                ..battle()
+            }],
+        };
+
+        assert_eq!(
+            plan_settlement(&snapshot),
+            Err(SettlementError::UnsupportedSource)
         );
     }
 }

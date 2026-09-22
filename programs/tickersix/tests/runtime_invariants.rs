@@ -707,7 +707,7 @@ fn finalize_price_phase(
             Instruction {
                 program_id: address(tickersix::ID),
                 accounts,
-                data: tickersix::instruction::FinalizePricePhase { phase }.data(),
+                data: tickersix::instruction::FinalizeJupiterPricePhase { phase }.data(),
             },
             &[],
         )

@@ -552,6 +552,27 @@ pub fn build_finalize_price_phase_instruction(
     reports: &[SignedAttestorReport],
     accounts: FinalizeAccounts,
 ) -> Result<Instruction, RelayError> {
+    build_finalize_price_phase_instruction_with_name(phase_number, reports, accounts, false)
+}
+
+/// Builds the canonical Jupiter-specific phase finalizer. The legacy generic
+/// builder remains available for compatibility, but new settlement workers
+/// should use this name so source selection is explicit in the instruction
+/// discriminator and in the resulting proof transaction.
+pub fn build_finalize_jupiter_price_phase_instruction(
+    phase_number: u8,
+    reports: &[SignedAttestorReport],
+    accounts: FinalizeAccounts,
+) -> Result<Instruction, RelayError> {
+    build_finalize_price_phase_instruction_with_name(phase_number, reports, accounts, true)
+}
+
+fn build_finalize_price_phase_instruction_with_name(
+    phase_number: u8,
+    reports: &[SignedAttestorReport],
+    accounts: FinalizeAccounts,
+    jupiter_name: bool,
+) -> Result<Instruction, RelayError> {
     let phase = phase_from_u8(phase_number)?;
     if reports.len() < 2 {
         return Err(RelayError::InsufficientReports);
@@ -602,7 +623,11 @@ pub fn build_finalize_price_phase_instruction(
     Ok(Instruction {
         program_id: address(tickersix::ID.to_bytes()),
         accounts: account_metas,
-        data: tickersix::instruction::FinalizePricePhase { phase }.data(),
+        data: if jupiter_name {
+            tickersix::instruction::FinalizeJupiterPricePhase { phase }.data()
+        } else {
+            tickersix::instruction::FinalizePricePhase { phase }.data()
+        },
     })
 }
 
@@ -619,6 +644,56 @@ pub fn build_mark_price_phase_unavailable_instruction(
     attestor_set: [u8; 32],
     marker: [u8; 32],
     attestors: [[u8; 32]; 3],
+) -> Result<Instruction, RelayError> {
+    build_mark_price_phase_unavailable_instruction_with_name(
+        phase_number,
+        round_asset,
+        market_round,
+        price_policy,
+        jupiter_source_config,
+        attestor_set,
+        marker,
+        attestors,
+        false,
+    )
+}
+
+/// Builds the canonical Jupiter-specific fail-closed phase transition.
+#[allow(clippy::too_many_arguments)]
+pub fn build_mark_jupiter_price_phase_unavailable_instruction(
+    phase_number: u8,
+    round_asset: [u8; 32],
+    market_round: [u8; 32],
+    price_policy: [u8; 32],
+    jupiter_source_config: [u8; 32],
+    attestor_set: [u8; 32],
+    marker: [u8; 32],
+    attestors: [[u8; 32]; 3],
+) -> Result<Instruction, RelayError> {
+    build_mark_price_phase_unavailable_instruction_with_name(
+        phase_number,
+        round_asset,
+        market_round,
+        price_policy,
+        jupiter_source_config,
+        attestor_set,
+        marker,
+        attestors,
+        true,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_mark_price_phase_unavailable_instruction_with_name(
+    phase_number: u8,
+    round_asset: [u8; 32],
+    market_round: [u8; 32],
+    price_policy: [u8; 32],
+    jupiter_source_config: [u8; 32],
+    attestor_set: [u8; 32],
+    marker: [u8; 32],
+    attestors: [[u8; 32]; 3],
+    jupiter_name: bool,
 ) -> Result<Instruction, RelayError> {
     let phase = phase_from_u8(phase_number)?;
     let mut report_accounts = Vec::with_capacity(attestors.len());
@@ -652,7 +727,11 @@ pub fn build_mark_price_phase_unavailable_instruction(
     Ok(Instruction {
         program_id: address(tickersix::ID.to_bytes()),
         accounts,
-        data: tickersix::instruction::MarkPricePhaseUnavailable { phase }.data(),
+        data: if jupiter_name {
+            tickersix::instruction::MarkJupiterPricePhaseUnavailable { phase }.data()
+        } else {
+            tickersix::instruction::MarkPricePhaseUnavailable { phase }.data()
+        },
     })
 }
 

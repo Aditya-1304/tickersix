@@ -1,15 +1,18 @@
+use anchor_lang::InstructionData;
 use market_data::{AttestorSigner, CanonicalPriceReport, PriceReportContext, SignedAttestorReport};
 use relay::{
     build_create_league_rated_battle_instruction, build_create_official_league_instruction,
     build_create_rated_battle_instruction, build_finalize_battle_instruction,
-    build_finalize_forfeit_instruction, build_finalize_market_round_instruction,
-    build_finalize_price_phase_instruction, build_join_league_instruction,
-    build_leave_league_instruction, build_mark_price_phase_unavailable_instruction,
-    build_settle_side_score_instruction, build_signed_legacy_relay_transaction,
-    build_submit_price_attestation_plan, build_void_battle_price_unavailable_instruction,
-    build_void_battle_system_incident_instruction, league_member_pda, league_pda,
-    CreateOfficialLeagueAccounts, CreateRatedBattleAccounts, FinalizeAccounts,
-    LeagueMembershipAccounts, LeagueRatedBattleAccounts, RelayAccounts, RelayError,
+    build_finalize_forfeit_instruction, build_finalize_jupiter_price_phase_instruction,
+    build_finalize_market_round_instruction, build_finalize_price_phase_instruction,
+    build_join_league_instruction, build_leave_league_instruction,
+    build_mark_jupiter_price_phase_unavailable_instruction,
+    build_mark_price_phase_unavailable_instruction, build_settle_side_score_instruction,
+    build_signed_legacy_relay_transaction, build_submit_price_attestation_plan,
+    build_void_battle_price_unavailable_instruction, build_void_battle_system_incident_instruction,
+    league_member_pda, league_pda, CreateOfficialLeagueAccounts, CreateRatedBattleAccounts,
+    FinalizeAccounts, LeagueMembershipAccounts, LeagueRatedBattleAccounts, RelayAccounts,
+    RelayError,
 };
 use solana_address::Address;
 use solana_hash::Hash;
@@ -290,6 +293,32 @@ fn finalize_plan_sorts_reports_and_rejects_mixed_phases() {
 }
 
 #[test]
+fn jupiter_finalize_builder_uses_the_canonical_source_specific_instruction() {
+    let first = report(0, 9, 100_000);
+    let second = report(0, 10, 100_010);
+    let instruction = build_finalize_jupiter_price_phase_instruction(
+        0,
+        &[first, second],
+        FinalizeAccounts {
+            price_policy: [10; 32],
+            jupiter_source_config: [14; 32],
+            market_quality_policy: [11; 32],
+            attestor_set: [12; 32],
+            finalizer: [13; 32],
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        instruction.data,
+        tickersix::instruction::FinalizeJupiterPricePhase {
+            phase: tickersix::PricePhase::Start,
+        }
+        .data()
+    );
+}
+
+#[test]
 fn finalize_plan_rejects_reports_for_another_program() {
     let bad_report = report_for_program(0, 9, 100_000, [99; 32]);
 
@@ -349,6 +378,26 @@ fn unavailable_plan_is_explicit_and_has_no_price_payload() {
     assert_eq!(instruction.accounts.len(), 9);
     assert!(instruction.accounts[0].is_writable);
     assert!(instruction.accounts[5].is_signer);
+
+    let jupiter_instruction = build_mark_jupiter_price_phase_unavailable_instruction(
+        1,
+        [3; 32],
+        [2; 32],
+        [10; 32],
+        [14; 32],
+        [12; 32],
+        [13; 32],
+        [[9; 32], [10; 32], [11; 32]],
+    )
+    .unwrap();
+    assert_eq!(
+        jupiter_instruction.data,
+        tickersix::instruction::MarkJupiterPricePhaseUnavailable {
+            phase: tickersix::PricePhase::End,
+        }
+        .data()
+    );
+
     assert!(build_mark_price_phase_unavailable_instruction(
         2,
         [3; 32],
