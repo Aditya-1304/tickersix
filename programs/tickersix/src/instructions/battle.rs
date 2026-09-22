@@ -822,6 +822,7 @@ mod tests {
             settlement_source_kind: crate::state::SettlementSourceKind::JupiterTokenSpotV1,
             settlement_source_config: Pubkey::new_from_array([1; 32]),
             jupiter_source_config_version: 1,
+            pyth_source_config_version: 0,
             price_policy_version: 1,
             market_quality_policy_version: 1,
             attestor_set_version: 1,

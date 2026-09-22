@@ -84,6 +84,12 @@ pub enum ErrorCode {
     InvalidAttestation,
     #[msg("The native Ed25519 verification instruction does not match the report")]
     InvalidAttestationInstruction,
+    #[msg("The pinned Pyth verifier instruction does not match the evidence")]
+    InvalidPythVerifierInstruction,
+    #[msg("Pyth evidence does not satisfy the frozen target, freshness, confidence, or Q9 policy")]
+    InvalidPythEvidence,
+    #[msg("Pyth source configuration is invalid or unavailable in this build")]
+    InvalidPythSourceConfig,
     #[msg("No compatible attestor quorum exists")]
     NoCompatibleQuorum,
     #[msg("Price phase has already been resolved")]

@@ -17,6 +17,7 @@ use protocol::parse_decimal_q9;
 use reqwest::StatusCode;
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
+use sha2::{Digest, Sha256};
 
 pub const DEFAULT_PYTH_PRO_BASE_URL: &str = "https://pyth-lazer.dourolabs.app";
 pub const DEFAULT_PRESTOCKS_URL: &str = "https://prestocks.com/api/prestocks";
@@ -57,6 +58,23 @@ pub struct PythPayloadAssessment {
     pub carried_forward: bool,
     pub market_session: PythMarketSession,
     pub solana_payload_bytes: usize,
+    /// Hash of the exact signed Solana payload bytes sent to the verifier.
+    pub solana_payload_hash: [u8; 32],
+}
+
+/// Source-specific evidence values passed to the feature-gated on-chain Pyth
+/// instruction. The verifier instruction-data hash is intentionally supplied
+/// separately because its wire envelope is owned by the pinned Pyth verifier.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub struct PythEvidenceEnvelope {
+    pub feed_id: u32,
+    pub payload_timestamp_us: u64,
+    pub feed_update_timestamp_us: u64,
+    pub price_mantissa: i64,
+    pub confidence_mantissa: u64,
+    pub exponent: i16,
+    pub normalized_price_q9: i64,
+    pub payload_hash: [u8; 32],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -277,7 +295,25 @@ pub fn validate_pyth_payload(
         carried_forward,
         market_session,
         solana_payload_bytes: solana_payload.len(),
+        solana_payload_hash: Sha256::digest(&solana_payload).into(),
     })
+}
+
+/// Converts a validated payload assessment into the exact semantic evidence
+/// envelope expected by the Pyth relay. This function cannot be called with an
+/// unchecked price because the assessment is produced only by
+/// `validate_pyth_payload`.
+pub fn pyth_evidence_envelope(assessment: PythPayloadAssessment) -> PythEvidenceEnvelope {
+    PythEvidenceEnvelope {
+        feed_id: assessment.feed_id,
+        payload_timestamp_us: assessment.payload_timestamp_us,
+        feed_update_timestamp_us: assessment.feed_update_timestamp_us,
+        price_mantissa: assessment.price_mantissa,
+        confidence_mantissa: u64::try_from(assessment.confidence).unwrap_or_default(),
+        exponent: assessment.exponent,
+        normalized_price_q9: assessment.price_q9,
+        payload_hash: assessment.solana_payload_hash,
+    }
 }
 
 fn parse_raw_i64(value: &RawValue) -> Option<i64> {

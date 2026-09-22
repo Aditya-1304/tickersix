@@ -106,6 +106,46 @@ pub mod tickersix {
         )
     }
 
+    #[cfg(feature = "pyth-pro")]
+    pub fn create_pyth_pro_source_config(
+        ctx: Context<CreatePythProSourceConfig>,
+        version: u16,
+        verifier_program: Pubkey,
+        max_payload_timestamp_delta_us: u64,
+        max_feed_age_us: u64,
+        max_confidence_bps: u16,
+        channel_kind: u8,
+        canonical_feed_set_hash: [u8; 32],
+    ) -> Result<()> {
+        instructions::pyth::handle_create_pyth_pro_source_config(
+            ctx,
+            version,
+            verifier_program,
+            max_payload_timestamp_delta_us,
+            max_feed_age_us,
+            max_confidence_bps,
+            channel_kind,
+            canonical_feed_set_hash,
+        )
+    }
+
+    #[cfg(feature = "pyth-pro")]
+    pub fn create_pyth_settlement_policy(
+        ctx: Context<CreatePythSettlementPolicy>,
+        version: u16,
+        source_config_version: u16,
+        observation_window_secs: u16,
+        canonical_policy_hash: [u8; 32],
+    ) -> Result<()> {
+        instructions::pyth::handle_create_pyth_settlement_policy(
+            ctx,
+            version,
+            source_config_version,
+            observation_window_secs,
+            canonical_policy_hash,
+        )
+    }
+
     pub fn create_market_quality_policy(
         ctx: Context<CreateMarketQualityPolicy>,
         version: u16,
@@ -191,6 +231,7 @@ pub mod tickersix {
         symbol: [u8; 8],
         scoring_mint: Pubkey,
         issuer_kind: u8,
+        pyth_feed_id: u32,
     ) -> Result<()> {
         instructions::admin::handle_create_registry_entry(
             ctx,
@@ -199,6 +240,7 @@ pub mod tickersix {
             symbol,
             scoring_mint,
             issuer_kind,
+            pyth_feed_id,
         )
     }
 
@@ -216,6 +258,36 @@ pub mod tickersix {
         is_replay: bool,
     ) -> Result<()> {
         instructions::round::handle_create_market_round_draft(
+            ctx,
+            round_id,
+            registry_version,
+            eligibility_snapshot_hash,
+            eligibility_frozen_at,
+            queue_close_at,
+            commit_deadline,
+            reveal_deadline,
+            start_target_at,
+            end_target_at,
+            is_replay,
+        )
+    }
+
+    #[cfg(feature = "pyth-pro")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn create_pyth_market_round_draft(
+        ctx: Context<CreatePythMarketRoundDraft>,
+        round_id: u64,
+        registry_version: u32,
+        eligibility_snapshot_hash: [u8; 32],
+        eligibility_frozen_at: i64,
+        queue_close_at: i64,
+        commit_deadline: i64,
+        reveal_deadline: i64,
+        start_target_at: i64,
+        end_target_at: i64,
+        is_replay: bool,
+    ) -> Result<()> {
+        instructions::pyth::handle_create_pyth_market_round_draft(
             ctx,
             round_id,
             registry_version,
@@ -250,8 +322,32 @@ pub mod tickersix {
         )
     }
 
+    #[cfg(feature = "pyth-pro")]
+    pub fn add_pyth_round_asset(
+        ctx: Context<AddPythRoundAsset>,
+        asset_id: u16,
+        scoring_mint: Pubkey,
+        issuer_kind: u8,
+        price_policy_version: u16,
+        market_quality_policy_version: u16,
+    ) -> Result<()> {
+        instructions::pyth::handle_add_pyth_round_asset(
+            ctx,
+            asset_id,
+            scoring_mint,
+            issuer_kind,
+            price_policy_version,
+            market_quality_policy_version,
+        )
+    }
+
     pub fn freeze_market_round(ctx: Context<FreezeMarketRound>) -> Result<()> {
         instructions::round::handle_freeze_market_round(ctx)
+    }
+
+    #[cfg(feature = "pyth-pro")]
+    pub fn freeze_pyth_market_round(ctx: Context<FreezePythMarketRound>) -> Result<()> {
+        instructions::pyth::handle_freeze_pyth_market_round(ctx)
     }
 
     pub fn advance_market_round(ctx: Context<AdvanceMarketRound>) -> Result<()> {
@@ -260,6 +356,11 @@ pub mod tickersix {
 
     pub fn finalize_market_round(ctx: Context<FinalizeMarketRound>) -> Result<()> {
         instructions::round::handle_finalize_market_round(ctx)
+    }
+
+    #[cfg(feature = "pyth-pro")]
+    pub fn finalize_pyth_market_round(ctx: Context<FinalizePythMarketRound>) -> Result<()> {
+        instructions::pyth::handle_finalize_pyth_market_round(ctx)
     }
 
     pub fn create_rated_battle(
@@ -323,6 +424,50 @@ pub mod tickersix {
             evidence_root,
             report_created_at,
         )
+    }
+
+    #[cfg(feature = "pyth-pro")]
+    #[allow(clippy::too_many_arguments)]
+    pub fn submit_or_record_pyth_evidence(
+        ctx: Context<SubmitOrRecordPythEvidence>,
+        phase: PricePhase,
+        feed_id: u32,
+        payload_timestamp_us: u64,
+        feed_update_timestamp_us: u64,
+        price_mantissa: i64,
+        confidence_mantissa: u64,
+        exponent: i16,
+        normalized_price_q9: i64,
+        payload_hash: [u8; 32],
+    ) -> Result<()> {
+        instructions::pyth::handle_submit_or_record_pyth_evidence(
+            ctx,
+            phase,
+            feed_id,
+            payload_timestamp_us,
+            feed_update_timestamp_us,
+            price_mantissa,
+            confidence_mantissa,
+            exponent,
+            normalized_price_q9,
+            payload_hash,
+        )
+    }
+
+    #[cfg(feature = "pyth-pro")]
+    pub fn finalize_pyth_price_phase(
+        ctx: Context<FinalizePythPricePhase>,
+        phase: PricePhase,
+    ) -> Result<()> {
+        instructions::pyth::handle_finalize_pyth_price_phase(ctx, phase)
+    }
+
+    #[cfg(feature = "pyth-pro")]
+    pub fn mark_pyth_price_phase_unavailable(
+        ctx: Context<MarkPythPricePhaseUnavailable>,
+        phase: PricePhase,
+    ) -> Result<()> {
+        instructions::pyth::handle_mark_pyth_price_phase_unavailable(ctx, phase)
     }
 
     pub fn finalize_price_phase(ctx: Context<FinalizePricePhase>, phase: PricePhase) -> Result<()> {

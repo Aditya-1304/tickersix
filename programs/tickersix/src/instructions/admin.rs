@@ -38,6 +38,7 @@ pub fn handle_initialize_config(ctx: Context<InitializeConfig>) -> Result<()> {
     config.current_market_quality_policy_version = 0;
     config.current_attestor_set_version = 0;
     config.current_jupiter_source_config_version = 0;
+    config.current_pyth_source_config_version = 0;
     config.bump = ctx.bumps.config;
     Ok(())
 }
@@ -392,6 +393,7 @@ pub fn handle_create_registry_entry(
     symbol: [u8; 8],
     scoring_mint: Pubkey,
     issuer_kind: u8,
+    pyth_feed_id: u32,
 ) -> Result<()> {
     require_admin(&ctx.accounts.config, &ctx.accounts.payer)?;
     require!(registry_version > 0, ErrorCode::InvalidRegistryVersion);
@@ -443,6 +445,7 @@ pub fn handle_create_registry_entry(
         comparability_kind: ComparabilityKind::CanonicallyComparable,
         terms_hash: [1; 32],
         provider_metadata_hash: [issuer_kind; 32],
+        pyth_feed_id,
         enabled: true,
     };
     asset.active = true;

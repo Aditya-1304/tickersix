@@ -81,6 +81,10 @@ pub struct RepresentationDescriptor {
     pub comparability_kind: ComparabilityKind,
     pub terms_hash: [u8; 32],
     pub provider_metadata_hash: [u8; 32],
+    /// Pyth Pro feed identity frozen with the representation. Zero means that
+    /// this representation has no Pyth settlement mapping and therefore
+    /// cannot be admitted to a Pyth-backed Market Round.
+    pub pyth_feed_id: u32,
     pub enabled: bool,
 }
 
@@ -154,6 +158,7 @@ pub struct Config {
     pub current_market_quality_policy_version: u16,
     pub current_attestor_set_version: u16,
     pub current_jupiter_source_config_version: u16,
+    pub current_pyth_source_config_version: u16,
     pub bump: u8,
 }
 
@@ -243,6 +248,7 @@ pub struct MarketRound {
     pub settlement_source_kind: SettlementSourceKind,
     pub settlement_source_config: Pubkey,
     pub jupiter_source_config_version: u16,
+    pub pyth_source_config_version: u16,
     /// Deprecated Jupiter compatibility fields used by existing report
     /// messages and off-chain consumers during the Slice 1 migration.
     pub price_policy_version: u16,
@@ -282,6 +288,7 @@ pub struct RoundAsset {
     pub token_program: Pubkey,
     pub representation_id: u32,
     pub provider_kind: ProviderKind,
+    pub pyth_feed_id: u32,
     pub issuer_kind: u8,
     pub settlement_source_kind: SettlementSourceKind,
     pub price_source_kind: PriceSourceKind,
@@ -402,5 +409,26 @@ pub struct PriceAttestation {
     pub last_source_block_id: u64,
     pub evidence_root: [u8; 32],
     pub report_created_at: i64,
+    pub bump: u8,
+}
+
+/// A source-specific Pyth evidence record. The account is created once per
+/// `(RoundAsset, phase)` and stores only the verified semantic fields needed by
+/// deterministic settlement. The signed payload itself stays off-chain; its
+/// hash is the on-chain commitment used by proof materialization.
+#[cfg(feature = "pyth-pro")]
+#[account]
+#[derive(InitSpace)]
+pub struct PythPriceEvidence {
+    pub round_asset: Pubkey,
+    pub phase: PricePhase,
+    pub feed_id: u32,
+    pub payload_timestamp_us: u64,
+    pub feed_update_timestamp_us: u64,
+    pub price_mantissa: i64,
+    pub confidence_mantissa: u64,
+    pub exponent: i16,
+    pub normalized_price_q9: i64,
+    pub payload_hash: [u8; 32],
     pub bump: u8,
 }

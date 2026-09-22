@@ -47,6 +47,32 @@ pub struct FinalizeAccounts {
     pub finalizer: [u8; 32],
 }
 
+/// Public accounts for one Pyth evidence submission. The signed payload is
+/// deliberately not accepted as a trusted boolean or price; the builder only
+/// carries the semantic fields and the hash of the exact signed payload,
+/// while the program rechecks the pinned verifier receipt.
+#[cfg(feature = "pyth-pro")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PythEvidenceAccounts {
+    pub round_asset: [u8; 32],
+    pub market_round: [u8; 32],
+    pub settlement_policy: [u8; 32],
+    pub pyth_source_config: [u8; 32],
+    pub relayer: [u8; 32],
+}
+
+/// Public accounts for permissionless Pyth phase finalization.
+#[cfg(feature = "pyth-pro")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PythFinalizeAccounts {
+    pub round_asset: [u8; 32],
+    pub market_round: [u8; 32],
+    pub settlement_policy: [u8; 32],
+    pub pyth_source_config: [u8; 32],
+    pub pyth_price_evidence: [u8; 32],
+    pub finalizer: [u8; 32],
+}
+
 /// Accounts required by the coordinator to admit one official Ranked Battle.
 /// The coordinator signer is supplied by the caller; this crate never stores
 /// or selects a coordinator private key.
@@ -189,7 +215,7 @@ pub fn build_submit_price_attestation_plan(
             readonly(address(accounts.attestor_set)),
             readonly(address(report.attestor)),
             writable(address(price_attestation.to_bytes())),
-            signer(address(accounts.relayer)),
+            signer_writable(address(accounts.relayer)),
             readonly(address(solana_instructions_sysvar::ID.to_bytes())),
             readonly(address(system_program::ID.to_bytes())),
         ],
@@ -211,6 +237,85 @@ pub fn build_submit_price_attestation_plan(
         submission,
         price_attestation: price_attestation.to_bytes(),
     })
+}
+
+/// Builds the Pyth verifier-receipt evidence instruction. The actual Pyth
+/// verifier instruction must be placed immediately before this instruction by
+/// the caller; the on-chain program checks both its pinned program id and its
+/// exact data hash through the Instructions sysvar.
+#[cfg(feature = "pyth-pro")]
+#[allow(clippy::too_many_arguments)]
+pub fn build_submit_or_record_pyth_evidence_instruction(
+    accounts: PythEvidenceAccounts,
+    phase: PricePhase,
+    feed_id: u32,
+    payload_timestamp_us: u64,
+    feed_update_timestamp_us: u64,
+    price_mantissa: i64,
+    confidence_mantissa: u64,
+    exponent: i16,
+    normalized_price_q9: i64,
+    payload_hash: [u8; 32],
+) -> Result<Instruction, RelayError> {
+    if feed_id == 0 || price_mantissa <= 0 || normalized_price_q9 <= 0 || payload_hash == [0; 32] {
+        return Err(RelayError::InvalidReport);
+    }
+
+    let round_asset = AnchorPubkey::new_from_array(accounts.round_asset);
+    let evidence = pyth_price_evidence_pda(round_asset, phase);
+    Ok(Instruction {
+        program_id: address(tickersix::ID.to_bytes()),
+        accounts: vec![
+            readonly(address(accounts.round_asset)),
+            readonly(address(accounts.market_round)),
+            readonly(address(accounts.settlement_policy)),
+            readonly(address(accounts.pyth_source_config)),
+            writable(address(evidence.to_bytes())),
+            signer_writable(address(accounts.relayer)),
+            readonly(address(solana_instructions_sysvar::ID.to_bytes())),
+            readonly(address(system_program::ID.to_bytes())),
+        ],
+        data: tickersix::instruction::SubmitOrRecordPythEvidence {
+            phase,
+            feed_id,
+            payload_timestamp_us,
+            feed_update_timestamp_us,
+            price_mantissa,
+            confidence_mantissa,
+            exponent,
+            normalized_price_q9,
+            payload_hash,
+        }
+        .data(),
+    })
+}
+
+/// Builds the permissionless Pyth phase-finalization instruction. The
+/// program, not this client helper, rechecks the evidence PDA and source
+/// binding before copying the verified Q9 price into the RoundAsset.
+#[cfg(feature = "pyth-pro")]
+pub fn build_finalize_pyth_price_phase_instruction(
+    accounts: PythFinalizeAccounts,
+    phase: PricePhase,
+) -> Instruction {
+    Instruction {
+        program_id: address(tickersix::ID.to_bytes()),
+        accounts: vec![
+            writable(address(accounts.round_asset)),
+            readonly(address(accounts.market_round)),
+            readonly(address(accounts.settlement_policy)),
+            readonly(address(accounts.pyth_source_config)),
+            readonly(address(accounts.pyth_price_evidence)),
+            signer(address(accounts.finalizer)),
+        ],
+        data: tickersix::instruction::FinalizePythPricePhase { phase }.data(),
+    }
+}
+
+/// Derives the canonical Pyth evidence PDA used by both relay instructions.
+#[cfg(feature = "pyth-pro")]
+pub fn pyth_price_evidence_address(round_asset: [u8; 32], phase: PricePhase) -> [u8; 32] {
+    pyth_price_evidence_pda(AnchorPubkey::new_from_array(round_asset), phase).to_bytes()
 }
 
 /// Builds the exact Anchor instruction used by the coordinator to create one
@@ -806,6 +911,19 @@ fn price_attestation_pda(
             round_asset.as_ref(),
             &[phase as u8],
             attestor.as_ref(),
+        ],
+        &tickersix::ID,
+    )
+    .0
+}
+
+#[cfg(feature = "pyth-pro")]
+fn pyth_price_evidence_pda(round_asset: AnchorPubkey, phase: PricePhase) -> AnchorPubkey {
+    AnchorPubkey::find_program_address(
+        &[
+            tickersix::PYTH_PRICE_EVIDENCE_SEED,
+            round_asset.as_ref(),
+            &[phase as u8],
         ],
         &tickersix::ID,
     )

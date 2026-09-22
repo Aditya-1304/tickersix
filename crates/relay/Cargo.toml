@@ -5,6 +5,10 @@ description = "Transaction construction for TickerSix price-report relays"
 edition.workspace = true
 rust-version.workspace = true
 
+[features]
+default = []
+pyth-pro = ["tickersix/pyth-pro"]
+
 [dependencies]
 anchor-lang = "1.1.2"
 market-data = { path = "../market-data" }

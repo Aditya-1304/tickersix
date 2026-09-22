@@ -116,6 +116,7 @@ pub fn handle_create_market_round_draft(
     round.settlement_source_kind = ctx.accounts.price_policy.source_kind;
     round.settlement_source_config = ctx.accounts.price_policy.source_config;
     round.jupiter_source_config_version = ctx.accounts.jupiter_source_config.version;
+    round.pyth_source_config_version = 0;
     round.price_policy_version = ctx.accounts.price_policy.version;
     round.market_quality_policy_version = ctx.accounts.market_quality_policy.version;
     round.attestor_set_version = ctx.accounts.attestor_set.version;
@@ -286,6 +287,7 @@ pub fn handle_add_round_asset(
     round_asset.token_program = ctx.accounts.registry_entry.descriptor.token_program;
     round_asset.representation_id = ctx.accounts.registry_entry.descriptor.representation_id;
     round_asset.provider_kind = ctx.accounts.registry_entry.descriptor.provider_kind;
+    round_asset.pyth_feed_id = ctx.accounts.registry_entry.descriptor.pyth_feed_id;
     round_asset.issuer_kind = issuer_kind;
     round_asset.settlement_source_kind = price_source_kind;
     round_asset.price_source_kind = price_source_kind;
@@ -495,7 +497,7 @@ pub fn handle_finalize_market_round(ctx: Context<FinalizeMarketRound>) -> Result
 /// Verifies that the caller supplied the complete, canonical set of RoundAsset
 /// accounts for the draft. This prevents a coordinator from omitting an older
 /// asset while adding a duplicate mint or freezing a partial account set.
-fn validate_round_assets(
+pub(crate) fn validate_round_assets(
     accounts: &[AccountInfo<'_>],
     round_key: Pubkey,
     round: &MarketRound,
@@ -550,6 +552,9 @@ fn validate_round_assets(
             asset.token_program != Pubkey::default(),
             ErrorCode::RegistryEntryMismatch
         );
+        if asset.settlement_source_kind == SettlementSourceKind::PythProVerifiedV1 {
+            require!(asset.pyth_feed_id != 0, ErrorCode::RegistryEntryMismatch);
+        }
         require!(
             seen_asset_ids[word] & bit == 0,
             ErrorCode::DuplicateRoundAsset
@@ -601,7 +606,7 @@ fn next_market_round_state(round: &MarketRound, now: i64) -> Result<MarketRoundS
     }
 }
 
-fn require_coordinator(config: &Config, signer: &Signer) -> Result<()> {
+pub(crate) fn require_coordinator(config: &Config, signer: &Signer) -> Result<()> {
     require_keys_eq!(
         config.coordinator_authority,
         signer.key(),
@@ -708,6 +713,7 @@ mod tests {
             settlement_source_kind: crate::state::SettlementSourceKind::JupiterTokenSpotV1,
             settlement_source_config: Pubkey::new_from_array([1; 32]),
             jupiter_source_config_version: 1,
+            pyth_source_config_version: 0,
             price_policy_version: 1,
             market_quality_policy_version: 1,
             attestor_set_version: 1,

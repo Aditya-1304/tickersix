@@ -18,13 +18,16 @@ use protocol::return_q9;
 use serde::{Deserialize, Serialize};
 
 pub const JUPITER_SETTLEMENT_TRUST_LABEL: &str = "FINAL - ATTESTED SOLANA MARKET SETTLEMENT";
-pub const PYTH_SETTLEMENT_TRUST_LABEL: &str = "FINAL - VERIFIED PYTH ADAPTER SETTLEMENT";
+pub const PYTH_SETTLEMENT_TRUST_LABEL: &str = "FINAL - PYTH VERIFIED ON SOLANA DEVNET";
 pub const ISSUER_SETTLEMENT_TRUST_LABEL: &str = "FINAL - VERIFIED ISSUER ORACLE SETTLEMENT";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum SourceKind {
     JupiterTokenSpotV1,
+    PythProVerifiedV1,
+    /// Compatibility value for snapshots produced before the Pyth Pro source
+    /// name was frozen. New snapshots must use `PythProVerifiedV1`.
     Pyth247IndexV1,
     VerifiedIssuerOracleV1,
 }
@@ -88,12 +91,29 @@ pub struct ReportProof {
     pub last_source_block_id: u64,
 }
 
+/// Semantic Pyth fields copied from the verified on-chain evidence account.
+/// The raw signed payload remains off-chain and is represented only by its
+/// commitment, so public proof material never exposes provider credentials or
+/// unverifiable client-supplied price claims.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PythEvidenceProof {
+    pub feed_id: u32,
+    pub payload_timestamp_us: u64,
+    pub feed_update_timestamp_us: u64,
+    pub price_mantissa: i64,
+    pub confidence_mantissa: u64,
+    pub exponent: i16,
+    pub normalized_price_q9: i64,
+    pub payload_hash: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PhaseProof {
     pub state: PhaseState,
     pub finalized_price_q9: Option<i64>,
     pub selected_reports: Vec<ReportProof>,
     pub evidence_commitment: Option<String>,
+    pub pyth_evidence: Option<PythEvidenceProof>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -246,8 +266,8 @@ impl ProofSnapshot {
             {
                 return Err(ProofError::PolicyMismatch);
             }
-            validate_phase(&asset.start)?;
-            validate_phase(&asset.end)?;
+            validate_phase(&asset.start, asset.source_kind)?;
+            validate_phase(&asset.end, asset.source_kind)?;
             match (asset.start.state, asset.end.state, asset.return_q9) {
                 (PhaseState::Finalized, PhaseState::Finalized, Some(return_q9_value)) => {
                     let start = asset
@@ -276,8 +296,9 @@ impl ProofSnapshot {
     }
 
     /// Converts only validated, non-secret settlement facts into the public
-    /// proof response. The Jupiter label is intentionally distinct from oracle
-    /// verification terminology.
+    /// proof response. Source-specific labels remain distinct so attested
+    /// Jupiter evidence is never presented as cryptographically verified Pyth
+    /// evidence, or vice versa.
     pub fn into_public(self) -> Result<PublicProof, ProofError> {
         self.validate()?;
         let source_trust_label = trust_label(self.round_assets[0].source_kind);
@@ -296,14 +317,32 @@ impl ProofSnapshot {
     }
 }
 
-fn validate_phase(phase: &PhaseProof) -> Result<(), ProofError> {
+fn validate_phase(phase: &PhaseProof, source_kind: SourceKind) -> Result<(), ProofError> {
     match phase.state {
         PhaseState::Finalized => {
             let price = phase.finalized_price_q9.ok_or(ProofError::InvalidPrice)?;
             if price <= 0 || phase.evidence_commitment.is_none() {
                 return Err(ProofError::InvalidPrice);
             }
-            if !(2..=3).contains(&phase.selected_reports.len()) {
+            if matches!(
+                source_kind,
+                SourceKind::JupiterTokenSpotV1 | SourceKind::VerifiedIssuerOracleV1
+            ) && !(2..=3).contains(&phase.selected_reports.len())
+            {
+                return Err(ProofError::InvalidReportSet);
+            }
+            if matches!(
+                source_kind,
+                SourceKind::PythProVerifiedV1 | SourceKind::Pyth247IndexV1
+            ) && (!phase.selected_reports.is_empty() || phase.pyth_evidence.is_none())
+            {
+                return Err(ProofError::InvalidReportSet);
+            }
+            if matches!(
+                source_kind,
+                SourceKind::JupiterTokenSpotV1 | SourceKind::VerifiedIssuerOracleV1
+            ) && phase.pyth_evidence.is_some()
+            {
                 return Err(ProofError::InvalidReportSet);
             }
             let mut attestors = Vec::with_capacity(phase.selected_reports.len());
@@ -324,11 +363,26 @@ fn validate_phase(phase: &PhaseProof) -> Result<(), ProofError> {
                 }
                 attestors.push(report.attestor.as_str());
             }
+            if let Some(evidence) = &phase.pyth_evidence {
+                if evidence.feed_id == 0
+                    || evidence.payload_timestamp_us < evidence.feed_update_timestamp_us
+                    || evidence.price_mantissa <= 0
+                    || evidence.normalized_price_q9 != price
+                    || evidence.payload_hash.len() != 64
+                    || !evidence
+                        .payload_hash
+                        .bytes()
+                        .all(|byte| byte.is_ascii_hexdigit())
+                {
+                    return Err(ProofError::InvalidPrice);
+                }
+            }
         }
         PhaseState::Unavailable => {
             if phase.finalized_price_q9.is_some()
                 || phase.evidence_commitment.is_some()
                 || !phase.selected_reports.is_empty()
+                || phase.pyth_evidence.is_some()
             {
                 return Err(ProofError::InvalidPhase);
             }
@@ -457,6 +511,7 @@ fn score_q9(returns: [i64; 6], lineup: &[u16], captain: u16) -> Result<i64, Proo
 fn trust_label(source_kind: SourceKind) -> &'static str {
     match source_kind {
         SourceKind::JupiterTokenSpotV1 => JUPITER_SETTLEMENT_TRUST_LABEL,
+        SourceKind::PythProVerifiedV1 => PYTH_SETTLEMENT_TRUST_LABEL,
         SourceKind::Pyth247IndexV1 => PYTH_SETTLEMENT_TRUST_LABEL,
         SourceKind::VerifiedIssuerOracleV1 => ISSUER_SETTLEMENT_TRUST_LABEL,
     }
@@ -556,6 +611,26 @@ mod tests {
             finalized_price_q9: Some(price),
             selected_reports: vec![report("a", price), report("b", price)],
             evidence_commitment: Some("commitment".to_owned()),
+            pyth_evidence: None,
+        }
+    }
+
+    fn pyth_phase(price: i64) -> PhaseProof {
+        PhaseProof {
+            state: PhaseState::Finalized,
+            finalized_price_q9: Some(price),
+            selected_reports: Vec::new(),
+            evidence_commitment: Some("pyth-commitment".to_owned()),
+            pyth_evidence: Some(PythEvidenceProof {
+                feed_id: 42,
+                payload_timestamp_us: 1_000_000,
+                feed_update_timestamp_us: 1_000_000,
+                price_mantissa: price,
+                confidence_mantissa: 1,
+                exponent: -9,
+                normalized_price_q9: price,
+                payload_hash: "00".repeat(32),
+            }),
         }
     }
 
@@ -618,5 +693,25 @@ mod tests {
             ProofSnapshot::reconcile(&indexed, &chain),
             Err(ProofError::ChainStateMismatch)
         );
+    }
+
+    #[test]
+    fn pyth_proof_requires_pyth_evidence_and_uses_the_devnet_label() {
+        let mut proof = snapshot();
+        proof.round_assets[0].source_kind = SourceKind::PythProVerifiedV1;
+        proof.round_assets[0].start = pyth_phase(100_000_000_000);
+        proof.round_assets[0].end = pyth_phase(110_000_000_000);
+        assert_eq!(
+            proof.into_public().unwrap().source_trust_label,
+            PYTH_SETTLEMENT_TRUST_LABEL
+        );
+
+        let mut missing = snapshot();
+        missing.round_assets[0].source_kind = SourceKind::PythProVerifiedV1;
+        missing.round_assets[0].start = PhaseProof {
+            pyth_evidence: None,
+            ..phase(100_000_000_000)
+        };
+        assert_eq!(missing.validate(), Err(ProofError::InvalidReportSet));
     }
 }

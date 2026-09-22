@@ -8,12 +8,16 @@ pub const SETTLEMENT_POLICY_SEED: &[u8] = b"settlement-policy";
 pub const PRICE_POLICY_SEED: &[u8] = SETTLEMENT_POLICY_SEED;
 pub const JUPITER_SOURCE_CONFIG_SEED: &[u8] = b"jupiter-source-config";
 pub const PYTH_PRO_SOURCE_CONFIG_SEED: &[u8] = b"pyth-pro-source-config";
+#[cfg(feature = "pyth-pro")]
+pub const PYTH_PRO_DEVNET_VERIFIER_PROGRAM: Pubkey =
+    pubkey!("pytd2yyk641x7ak7mkaasSJVXh6YYZnC7wTmtgAyxPt");
 pub const QUALITY_POLICY_SEED: &[u8] = b"quality-policy";
 pub const ATTESTOR_SET_SEED: &[u8] = b"attestor-set";
 pub const ASSET_SEED: &[u8] = b"asset";
 pub const MARKET_ROUND_SEED: &[u8] = b"market-round";
 pub const ROUND_ASSET_SEED: &[u8] = b"round-asset";
 pub const PRICE_ATTESTATION_SEED: &[u8] = b"price-attestation";
+pub const PYTH_PRICE_EVIDENCE_SEED: &[u8] = b"pyth-price-evidence";
 pub const BATTLE_SEED: &[u8] = b"battle";
 pub const RATED_SLOT_SEED: &[u8] = b"rated-slot";
 pub const LEAGUE_SEED: &[u8] = b"league";

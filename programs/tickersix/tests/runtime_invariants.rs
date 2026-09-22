@@ -314,6 +314,7 @@ impl Harness {
                         symbol: [b'A' + (asset_id as u8), 0, 0, 0, 0, 0, 0, 0],
                         scoring_mint: Pubkey::new_from_array([100 + asset_id as u8; 32]),
                         issuer_kind: 1,
+                        pyth_feed_id: 0,
                     }
                     .data(),
                 },
