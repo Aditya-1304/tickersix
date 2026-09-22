@@ -1,0 +1,109 @@
+{
+  "source": "https://pyth.dourolabs.app/v1/symbols",
+  "observed_at": "2026-09-22T00:00:00Z",
+  "available_stable_equity_feed_count": 1213,
+  "required_public_equity_feed_count": 10,
+  "target_timestamp_us": 1790071800000000,
+  "target_feed_id": 1398,
+  "feeds": [
+    {
+      "pyth_lazer_id": 922,
+      "symbol": "Equity.US.AAPL/USD",
+      "asset_type": "equity",
+      "instrument_type": "spot",
+      "state": "stable",
+      "exponent": -5,
+      "min_channel": "fixed_rate@50ms"
+    },
+    {
+      "pyth_lazer_id": 923,
+      "symbol": "Equity.US.ABBV/USD",
+      "asset_type": "equity",
+      "instrument_type": "spot",
+      "state": "stable",
+      "exponent": -5,
+      "min_channel": "fixed_rate@200ms"
+    },
+    {
+      "pyth_lazer_id": 924,
+      "symbol": "Equity.US.ABNB/USD",
+      "asset_type": "equity",
+      "instrument_type": "spot",
+      "state": "stable",
+      "exponent": -5,
+      "min_channel": "fixed_rate@200ms"
+    },
+    {
+      "pyth_lazer_id": 925,
+      "symbol": "Equity.US.ABT/USD",
+      "asset_type": "equity",
+      "instrument_type": "spot",
+      "state": "stable",
+      "exponent": -5,
+      "min_channel": "fixed_rate@200ms"
+    },
+    {
+      "pyth_lazer_id": 926,
+      "symbol": "Equity.US.ACGL/USD",
+      "asset_type": "equity",
+      "instrument_type": "spot",
+      "state": "stable",
+      "exponent": -5,
+      "min_channel": "fixed_rate@200ms"
+    },
+    {
+      "pyth_lazer_id": 927,
+      "symbol": "Equity.US.ACN/USD",
+      "asset_type": "equity",
+      "instrument_type": "spot",
+      "state": "stable",
+      "exponent": -5,
+      "min_channel": "fixed_rate@200ms"
+    },
+    {
+      "pyth_lazer_id": 928,
+      "symbol": "Equity.US.ADBE/USD",
+      "asset_type": "equity",
+      "instrument_type": "spot",
+      "state": "stable",
+      "exponent": -5,
+      "min_channel": "fixed_rate@200ms"
+    },
+    {
+      "pyth_lazer_id": 929,
+      "symbol": "Equity.US.ADI/USD",
+      "asset_type": "equity",
+      "instrument_type": "spot",
+      "state": "stable",
+      "exponent": -5,
+      "min_channel": "fixed_rate@200ms"
+    },
+    {
+      "pyth_lazer_id": 930,
+      "symbol": "Equity.US.ADM/USD",
+      "asset_type": "equity",
+      "instrument_type": "spot",
+      "state": "stable",
+      "exponent": -5,
+      "min_channel": "fixed_rate@200ms"
+    },
+    {
+      "pyth_lazer_id": 931,
+      "symbol": "Equity.US.ADP/USD",
+      "asset_type": "equity",
+      "instrument_type": "spot",
+      "state": "stable",
+      "exponent": -5,
+      "min_channel": "fixed_rate@200ms"
+    },
+    {
+      "pyth_lazer_id": 1398,
+      "symbol": "Equity.US.SPY/USD",
+      "asset_type": "equity",
+      "instrument_type": "spot",
+      "state": "stable",
+      "exponent": -5,
+      "min_channel": "fixed_rate@50ms"
+    }
+  ]
+}

@@ -2425,6 +2425,7 @@ name = "market-data"
 version = "0.1.0"
 dependencies = [
  "ed25519-dalek 2.2.0",
+ "hex",
  "protocol",
  "reqwest",
  "serde",

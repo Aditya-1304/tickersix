@@ -1,0 +1,35 @@
+[
+  {
+    "id": "T-OpenAI",
+    "name": "T-OpenAI",
+    "symbol": "T-OpenAI",
+    "code": "tOpenAI",
+    "sector": "Artificial Intelligence",
+    "mint": "oPAiAikWTaFj9RYoRFD35ccfwhnMcB3ThgBZRHSkjTZ",
+    "markPrice": 812.79,
+    "holders": 8259,
+    "markValuation": 950000000000
+  },
+  {
+    "id": "T-Kalshi",
+    "name": "T-Kalshi",
+    "symbol": "T-Kalshi",
+    "code": "tKalshi",
+    "sector": "Financial Services",
+    "mint": "tKalshiExampleMint111111111111111111111111",
+    "markPrice": 1.0,
+    "holders": 100,
+    "markValuation": 10000000000
+  },
+  {
+    "id": "T-SpaceX",
+    "name": "T-SpaceX",
+    "symbol": "T-SpaceX",
+    "code": "tSpaceX",
+    "sector": "Aerospace",
+    "mint": "tSpaceXExampleMint11111111111111111111111",
+    "markPrice": 245.25,
+    "holders": 250,
+    "markValuation": 210000000000
+  }
+]

@@ -15,10 +15,12 @@ use std::{
 };
 
 use market_data::{
+    assess_private_market_catalogs, decide_pyth_activation,
     evaluate_xstocks_baseline_with_verified_token_program, stagger_offsets_millis,
-    summarize_observation_window, validate_jupiter_baseline, validate_sampling_plan,
-    JupiterBaselineConfig, JupiterClient, MarketDataObservation, PriceBatch,
-    XStocksBaselineSnapshot, XStocksClient,
+    summarize_observation_window, validate_jupiter_baseline, validate_pyth_payload,
+    validate_sampling_plan, JupiterBaselineConfig, JupiterClient, MarketDataObservation,
+    PriceBatch, PythActivationDecision, PythActivationInputs, PythPayloadAssessment,
+    PythValidationPolicy, SponsorClient, XStocksBaselineSnapshot, XStocksClient,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPoolOptions;
@@ -74,6 +76,87 @@ struct JupiterSmokeReport {
 }
 
 #[derive(Debug, Deserialize)]
+struct PythCoverageFixture {
+    available_stable_equity_feed_count: usize,
+    required_public_equity_feed_count: usize,
+    target_timestamp_us: u64,
+    target_feed_id: u32,
+    feeds: Vec<PythCoverageFeed>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PythCoverageFeed {
+    pyth_lazer_id: u32,
+    symbol: String,
+    asset_type: String,
+    instrument_type: String,
+    state: String,
+    exponent: i16,
+    min_channel: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+struct PythDevnetEvidence {
+    cluster: String,
+    verifier_program: String,
+    payload_format: String,
+    trial_token_active: bool,
+    verified: bool,
+    simulation_performed: bool,
+    transaction_signature: Option<String>,
+    compute_units: Option<u64>,
+    transaction_bytes: Option<u64>,
+    lamports: Option<u64>,
+    latency_ms: Option<u64>,
+    reason: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ExcludedProvidersFixture {
+    providers: Vec<String>,
+    reason: String,
+}
+
+#[derive(Debug, Serialize)]
+struct Phase0Slice2Report {
+    slice: &'static str,
+    public_ranked_provider: &'static str,
+    excluded_providers: Vec<&'static str>,
+    pyth: Phase0Slice2PythReport,
+    private_market: market_data::PrivateMarketCatalogAssessment,
+}
+
+#[derive(Debug, Serialize)]
+struct Phase0Slice2PythReport {
+    feed_coverage_available: usize,
+    feed_coverage_required: usize,
+    target_feed_id: u32,
+    target_timestamp_us: u64,
+    coverage_feed_count: usize,
+    coverage_valid: bool,
+    validation: PythPayloadAssessment,
+    validation_policy_passed: bool,
+    q9_vectors_passed: bool,
+    devnet: PythDevnetEvidence,
+    cost_evidence_recorded: bool,
+    activation_decision: PythActivationDecision,
+}
+
+#[derive(Debug, Serialize)]
+struct PrivateMarketSmokeReport {
+    quality_measured: bool,
+    catalog: market_data::PrivateMarketCatalogAssessment,
+}
+
+#[derive(Debug, Serialize)]
+struct PythSmokeReport {
+    api_key_configured: bool,
+    expected_feed_id: u32,
+    target_timestamp_us: u64,
+    assessment: PythPayloadAssessment,
+}
+
+#[derive(Debug, Deserialize)]
 struct VerifiedTokenProgramFixture {
     owner: String,
     token_program: String,
@@ -99,8 +182,11 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Some("record-token-metadata") => record_token_metadata().await?,
         Some("analyze-market-data") => analyze_market_data()?,
         Some("phase0-slice1-gate") => run_phase0_slice1_gate()?,
+        Some("phase0-slice2-gate") => run_phase0_slice2_gate()?,
         Some("jupiter-smoke") => run_jupiter_smoke().await?,
         Some("xstocks-smoke") => run_xstocks_smoke().await?,
+        Some("private-market-smoke") => run_private_market_smoke().await?,
+        Some("pyth-pro-smoke") => run_pyth_pro_smoke().await?,
         Some("attestor-run") => attestor::run().await?,
         Some("api-serve") => api::serve_from_env().await?,
         Some("ranked-match") => run_ranked_match().await?,
@@ -169,6 +255,132 @@ fn run_phase0_slice1_gate() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Runs the deterministic Phase 0 Slice 0.2 sponsor gate against committed
+/// fixtures. The gate validates provider-shaped data, exact timestamp/Q9
+/// policy, and the evidence required before any Pyth path could be promoted.
+/// It intentionally keeps Public Ranked on Jupiter because the checked-in
+/// Devnet evidence records no authorized verifier run.
+fn run_phase0_slice2_gate() -> Result<(), Box<dyn Error>> {
+    let fixture_dir = env::args()
+        .nth(2)
+        .unwrap_or_else(|| "fixtures/phase0/sponsors".to_owned());
+    let fixture_root = Path::new(&fixture_dir);
+    let coverage: PythCoverageFixture = serde_json::from_str(&read_to_string(
+        fixture_root.join("pyth-feed-coverage.json"),
+    )?)?;
+    validate_pyth_coverage(&coverage)?;
+
+    let policy = PythValidationPolicy {
+        expected_feed_id: coverage.target_feed_id,
+        target_timestamp_us: coverage.target_timestamp_us,
+        max_feed_age_us: 1_000_000,
+        max_confidence_bps: 100,
+        require_fresh_update: true,
+        reject_closed_session: true,
+    };
+    let validation = validate_pyth_payload(
+        &read_to_string(fixture_root.join("pyth-payload.json"))?,
+        policy,
+    )?;
+    let devnet: PythDevnetEvidence = serde_json::from_str(&read_to_string(
+        fixture_root.join("pyth-devnet-evidence.json"),
+    )?)?;
+    let excluded: ExcludedProvidersFixture = serde_json::from_str(&read_to_string(
+        fixture_root.join("excluded-providers.json"),
+    )?)?;
+    validate_excluded_providers(&excluded)?;
+    if devnet.cluster != "devnet"
+        || devnet.verifier_program != market_data::PYTH_PRO_DEVNET_VERIFIER_PROGRAM
+        || devnet.payload_format != "solana"
+    {
+        return Err("Pyth Devnet evidence fixture does not identify the pinned verifier".into());
+    }
+    let cost_evidence_recorded = devnet.compute_units.is_some()
+        && devnet.transaction_bytes.is_some()
+        && devnet.lamports.is_some()
+        && devnet.latency_ms.is_some();
+    let q9_vectors_passed = validation.price_q9 == 774_100_500_000;
+    let activation_decision = decide_pyth_activation(PythActivationInputs {
+        trial_token_active: devnet.trial_token_active,
+        required_feed_count: coverage.required_public_equity_feed_count,
+        available_feed_count: coverage.available_stable_equity_feed_count,
+        payload_policy_passed: true,
+        devnet_verification_passed: devnet.verified && devnet.simulation_performed,
+        q9_vectors_passed,
+        cost_evidence_recorded,
+    });
+    let private_market = assess_private_market_catalogs(
+        &read_to_string(fixture_root.join("prestocks.json"))?,
+        &read_to_string(fixture_root.join("tessera.json"))?,
+        false,
+    )?;
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&Phase0Slice2Report {
+            slice: "phase0.2",
+            public_ranked_provider: "Jupiter",
+            excluded_providers: market_data::EXCLUDED_PHASE0_SPONSOR_PROVIDERS.to_vec(),
+            pyth: Phase0Slice2PythReport {
+                feed_coverage_available: coverage.available_stable_equity_feed_count,
+                feed_coverage_required: coverage.required_public_equity_feed_count,
+                target_feed_id: coverage.target_feed_id,
+                target_timestamp_us: coverage.target_timestamp_us,
+                coverage_feed_count: coverage.feeds.len(),
+                coverage_valid: true,
+                validation,
+                validation_policy_passed: true,
+                q9_vectors_passed,
+                devnet,
+                cost_evidence_recorded,
+                activation_decision,
+            },
+            private_market,
+        })?
+    );
+    Ok(())
+}
+
+fn validate_excluded_providers(fixture: &ExcludedProvidersFixture) -> Result<(), Box<dyn Error>> {
+    let actual = fixture
+        .providers
+        .iter()
+        .map(|provider| provider.trim().to_ascii_lowercase())
+        .collect::<BTreeSet<_>>();
+    let expected = market_data::EXCLUDED_PHASE0_SPONSOR_PROVIDERS
+        .iter()
+        .map(|provider| provider.to_ascii_lowercase())
+        .collect::<BTreeSet<_>>();
+    if fixture.reason.trim().is_empty() || actual != expected {
+        return Err("Phase 0 sponsor exclusion fixture is incomplete".into());
+    }
+    Ok(())
+}
+
+fn validate_pyth_coverage(coverage: &PythCoverageFixture) -> Result<(), Box<dyn Error>> {
+    if coverage.required_public_equity_feed_count < market_data::PYTH_MIN_PUBLIC_EQUITY_FEEDS
+        || coverage.available_stable_equity_feed_count < coverage.required_public_equity_feed_count
+        || coverage.feeds.len() < coverage.required_public_equity_feed_count
+    {
+        return Err("Pyth fixture does not meet the minimum public-equity coverage gate".into());
+    }
+    let target = coverage
+        .feeds
+        .iter()
+        .find(|feed| feed.pyth_lazer_id == coverage.target_feed_id)
+        .ok_or("Pyth fixture omits its target feed")?;
+    if target.asset_type != "equity"
+        || target.instrument_type != "spot"
+        || target.state != "stable"
+        || target.exponent != -5
+        || target.symbol.is_empty()
+        || target.min_channel.is_empty()
+    {
+        return Err("Pyth target feed is not a stable spot-equity fixture".into());
+    }
+    Ok(())
+}
+
 /// Performs a live, unauthenticated, read-only xStocks contract smoke test.
 ///
 /// No wallet, signing key, transaction, or settlement state is touched. The
@@ -214,6 +426,103 @@ async fn run_jupiter_smoke() -> Result<(), Box<dyn Error>> {
         serde_json::to_string_pretty(&JupiterSmokeReport {
             api_key_configured: api_key.is_some(),
             batch,
+        })?
+    );
+    Ok(())
+}
+
+/// Performs read-only catalog fetches for PreStocks and Tessera. The command
+/// records metadata readiness only; it never marks private representations as
+/// comparable or eligible for rated settlement.
+async fn run_private_market_smoke() -> Result<(), Box<dyn Error>> {
+    let pyth_base_url = env::var("TICKERSIX_PYTH_PRO_BASE_URL")
+        .unwrap_or_else(|_| market_data::DEFAULT_PYTH_PRO_BASE_URL.to_owned());
+    let prestocks_url = env::var("TICKERSIX_PRESTOCKS_URL")
+        .unwrap_or_else(|_| market_data::DEFAULT_PRESTOCKS_URL.to_owned());
+    let tessera_url = env::var("TICKERSIX_TESSERA_URL")
+        .unwrap_or_else(|_| market_data::DEFAULT_TESSERA_URL.to_owned());
+    let client = SponsorClient::with_urls(pyth_base_url, prestocks_url, tessera_url, None)?;
+    let catalog = client.fetch_private_catalogs(false).await?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&PrivateMarketSmokeReport {
+            quality_measured: false,
+            catalog,
+        })?
+    );
+    Ok(())
+}
+
+/// Performs one authenticated, read-only Pyth Pro `/v1/price` request. This
+/// command validates the returned application payload but does not submit the
+/// embedded Solana payload or sign any transaction.
+async fn run_pyth_pro_smoke() -> Result<(), Box<dyn Error>> {
+    let feed_ids = env::args()
+        .nth(2)
+        .ok_or("usage: cargo run -p backend -- pyth-pro-smoke <feed[,feed...]> <timestamp_us> [channel]")?
+        .split(',')
+        .map(str::trim)
+        .filter(|feed_id| !feed_id.is_empty())
+        .map(str::parse::<u32>)
+        .collect::<Result<Vec<_>, _>>()?;
+    if feed_ids.is_empty() {
+        return Err("pyth-pro-smoke requires at least one feed ID".into());
+    }
+    let target_timestamp_us = env::args()
+        .nth(3)
+        .ok_or("pyth-pro-smoke requires target_timestamp_us")?
+        .parse::<u64>()?;
+    let channel = env::args()
+        .nth(4)
+        .unwrap_or_else(|| "fixed_rate@50ms".to_owned());
+    let expected_feed_id = env::var("TICKERSIX_PYTH_EXPECTED_FEED_ID")
+        .ok()
+        .map(|value| value.parse::<u32>())
+        .transpose()?
+        .unwrap_or(feed_ids[0]);
+    if !feed_ids.contains(&expected_feed_id) {
+        return Err("expected Pyth feed ID must be included in the requested feed list".into());
+    }
+    let api_key = env::var("TICKERSIX_PYTH_PRO_API_KEY")
+        .map_err(|_| "TICKERSIX_PYTH_PRO_API_KEY is required for pyth-pro-smoke")?;
+    let pyth_base_url = env::var("TICKERSIX_PYTH_PRO_BASE_URL")
+        .unwrap_or_else(|_| market_data::DEFAULT_PYTH_PRO_BASE_URL.to_owned());
+    let client = SponsorClient::with_urls(
+        pyth_base_url,
+        market_data::DEFAULT_PRESTOCKS_URL,
+        market_data::DEFAULT_TESSERA_URL,
+        Some(api_key),
+    )?;
+    let assessment = client
+        .fetch_pyth_price(
+            &feed_ids,
+            target_timestamp_us,
+            &channel,
+            PythValidationPolicy {
+                expected_feed_id,
+                target_timestamp_us,
+                max_feed_age_us: env::var("TICKERSIX_PYTH_MAX_FEED_AGE_US")
+                    .ok()
+                    .map(|value| value.parse::<u64>())
+                    .transpose()?
+                    .unwrap_or(1_000_000),
+                max_confidence_bps: env::var("TICKERSIX_PYTH_MAX_CONFIDENCE_BPS")
+                    .ok()
+                    .map(|value| value.parse::<u32>())
+                    .transpose()?
+                    .unwrap_or(100),
+                require_fresh_update: true,
+                reject_closed_session: true,
+            },
+        )
+        .await?;
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&PythSmokeReport {
+            api_key_configured: true,
+            expected_feed_id,
+            target_timestamp_us,
+            assessment,
         })?
     );
     Ok(())
@@ -511,12 +820,19 @@ fn print_usage() {
         r#"Usage: cargo run -p backend -- record-market-data
 Metadata: cargo run -p backend -- record-token-metadata
 Phase 0 Slice 0.1 gate: cargo run -p backend -- phase0-slice1-gate fixtures/phase0 SPYx
+Phase 0 Slice 0.2 gate: cargo run -p backend -- phase0-slice2-gate fixtures/phase0/sponsors
 Live Jupiter smoke: cargo run -p backend -- jupiter-smoke <mint[,mint...]>
 Live xStocks smoke: cargo run -p backend -- xstocks-smoke SPYx Solana
+Live private-market smoke: cargo run -p backend -- private-market-smoke
+Live Pyth Pro smoke: TICKERSIX_PYTH_PRO_API_KEY=... cargo run -p backend -- pyth-pro-smoke <feed[,feed...]> <timestamp_us> [channel]
 
 Required: TICKERSIX_MARKET_DATA_MINTS=mint_a,mint_b,...
 Optional: TICKERSIX_JUPITER_API_KEY, TICKERSIX_MARKET_DATA_OUTPUT,
 TICKERSIX_XSTOCKS_BASE_URL, TICKERSIX_SOLANA_RPC_URL,
+TICKERSIX_PYTH_PRO_API_KEY, TICKERSIX_PYTH_PRO_BASE_URL,
+TICKERSIX_PYTH_EXPECTED_FEED_ID, TICKERSIX_PYTH_MAX_FEED_AGE_US,
+TICKERSIX_PYTH_MAX_CONFIDENCE_BPS, TICKERSIX_PRESTOCKS_URL,
+TICKERSIX_TESSERA_URL,
 TICKERSIX_MARKET_DATA_ATTESTOR_ID, TICKERSIX_MARKET_DATA_ATTESTOR_INDEX,
 TICKERSIX_MARKET_DATA_ITERATIONS, TICKERSIX_MARKET_DATA_SAMPLE_INTERVAL_SECS
 

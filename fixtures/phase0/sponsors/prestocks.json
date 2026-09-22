@@ -1,0 +1,26 @@
+[
+  {
+    "name": "OpenAI PreStocks",
+    "symbol": "OPENAI",
+    "description": "OPENAI is a PreStocks issued token backed 1:1 by SPV exposure that tracks the price of the underlying private company.",
+    "external_url": "https://prestocks.com/openai",
+    "contract_address": "PreweJYECqtQwBtpxHL171nL2K6umo692gTm7Q3rpgF",
+    "markPrice": 1001.4540065446288,
+    "markValuation": 1240731710609,
+    "tokenPrice": 1152.9663546323225,
+    "impliedValuation": 1428444949153,
+    "supply": 2826.4156228188335
+  },
+  {
+    "name": "Anduril PreStocks",
+    "symbol": "ANDURIL",
+    "description": "ANDURIL is a PreStocks issued token backed 1:1 by SPV exposure that tracks the price of the underlying private company.",
+    "external_url": "https://prestocks.com/anduril",
+    "contract_address": "PreAndurilExampleContract111111111111111111",
+    "markPrice": 10.0,
+    "markValuation": 30000000000,
+    "tokenPrice": 10.0,
+    "impliedValuation": 30000000000,
+    "supply": 1000000000
+  }
+]

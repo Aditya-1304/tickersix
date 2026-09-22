@@ -1,0 +1,20 @@
+{
+  "type": "streamUpdated",
+  "parsed": {
+    "timestampUs": "1790071800000000",
+    "priceFeeds": [
+      {
+        "priceFeedId": 1398,
+        "price": "77410050",
+        "exponent": -5,
+        "confidence": "1000",
+        "marketSession": "regular",
+        "feedUpdateTimestamp": 1790071800000000
+      }
+    ]
+  },
+  "solana": {
+    "encoding": "hex",
+    "data": "b9011a82d239c094c52016990d6ca2b261dbb1157ad503cbd3ea0679493316150cf3457624d19ec3f6e0a0e94373ab0971e39d939beda15cc02eb3c5454eb700f1f7310df65210bee4fcf5b1cee1e537fabcfd95010297653b94af04d454fc473e94834f2a0075d3c7938094b99e52260600030201000000010000b5ea6fea00000002000000010000c58f44d3010000"
+  }
+}

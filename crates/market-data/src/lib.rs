@@ -22,9 +22,11 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::value::RawValue;
 
 pub mod baseline;
+pub mod sponsors;
 pub mod xstocks;
 
 pub use baseline::*;
+pub use sponsors::*;
 pub use xstocks::*;
 
 /// Jupiter documents a maximum of 50 comma-separated price IDs per request.

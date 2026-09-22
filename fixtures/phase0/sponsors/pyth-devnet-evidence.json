@@ -1,0 +1,14 @@
+{
+  "cluster": "devnet",
+  "verifier_program": "pytd2yyk641x7ak7mkaasSJVXh6YYZnC7wTmtgAyxPt",
+  "payload_format": "solana",
+  "trial_token_active": false,
+  "verified": false,
+  "simulation_performed": false,
+  "transaction_signature": null,
+  "compute_units": null,
+  "transaction_bytes": null,
+  "lamports": null,
+  "latency_ms": null,
+  "reason": "Awaiting authorized Pyth Pro access and explicit Devnet verifier run"
+}
