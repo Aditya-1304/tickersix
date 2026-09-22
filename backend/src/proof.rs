@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 pub const JUPITER_SETTLEMENT_TRUST_LABEL: &str = "FINAL - ATTESTED SOLANA MARKET SETTLEMENT";
 pub const PYTH_SETTLEMENT_TRUST_LABEL: &str = "FINAL - PYTH VERIFIED ON SOLANA DEVNET";
 pub const ISSUER_SETTLEMENT_TRUST_LABEL: &str = "FINAL - VERIFIED ISSUER ORACLE SETTLEMENT";
+pub const PYTH_DEVNET_VERIFIER_PROGRAM: &str = "pytd2yyk641x7ak7mkaasSJVXh6YYZnC7wTmtgAyxPt";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -81,6 +82,12 @@ pub struct MarketRoundProof {
     pub price_policy_version: u16,
     pub quality_policy_version: u16,
     pub attestor_set_version: u16,
+    /// Frozen Unix-second boundaries copied from the on-chain Market Round.
+    /// Pyth evidence timestamps are checked against the matching boundary.
+    #[serde(default)]
+    pub start_target_at: i64,
+    #[serde(default)]
+    pub end_target_at: i64,
     #[serde(default = "default_jupiter_source_kind")]
     pub source_kind: SourceKind,
     /// Signature of the transaction that finalized the market round. The
@@ -112,6 +119,7 @@ pub struct ReportProof {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PythEvidenceProof {
     pub feed_id: u32,
+    pub target_timestamp_us: u64,
     pub payload_timestamp_us: u64,
     pub feed_update_timestamp_us: u64,
     pub price_mantissa: i64,
@@ -119,6 +127,11 @@ pub struct PythEvidenceProof {
     pub exponent: i16,
     pub normalized_price_q9: i64,
     pub payload_hash: String,
+    pub max_payload_timestamp_delta_us: u64,
+    pub max_feed_age_us: u64,
+    pub max_confidence_bps: u16,
+    pub verifier_program: String,
+    pub verifier_transaction_signature: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -225,6 +238,7 @@ pub enum ProofError {
     BattleRoundMismatch,
     BattleNotFinalized,
     MissingBattleTransaction,
+    InvalidPythEvidence,
     ChainStateMismatch,
     MissingSettlementTransaction,
     Io(String),
@@ -251,6 +265,7 @@ impl fmt::Display for ProofError {
             Self::MissingBattleTransaction => {
                 "proof Battle lifecycle is missing a referenced transaction"
             }
+            Self::InvalidPythEvidence => "proof Pyth evidence is not verifier- or policy-valid",
             Self::ChainStateMismatch => "indexed proof differs from reconciled chain state",
             Self::MissingSettlementTransaction => {
                 "proof is missing the finalized settlement transaction"
@@ -333,8 +348,18 @@ impl ProofSnapshot {
             {
                 return Err(ProofError::PolicyMismatch);
             }
-            validate_phase(&asset.start, asset.source_kind)?;
-            validate_phase(&asset.end, asset.source_kind)?;
+            validate_phase(
+                &asset.start,
+                asset.source_kind,
+                self.market_round.start_target_at,
+                &self.transaction_signatures,
+            )?;
+            validate_phase(
+                &asset.end,
+                asset.source_kind,
+                self.market_round.end_target_at,
+                &self.transaction_signatures,
+            )?;
             match (asset.start.state, asset.end.state, asset.return_q9) {
                 (PhaseState::Finalized, PhaseState::Finalized, Some(return_q9_value)) => {
                     let start = asset
@@ -390,7 +415,12 @@ impl ProofSnapshot {
     }
 }
 
-fn validate_phase(phase: &PhaseProof, source_kind: SourceKind) -> Result<(), ProofError> {
+fn validate_phase(
+    phase: &PhaseProof,
+    source_kind: SourceKind,
+    target_seconds: i64,
+    transaction_signatures: &[String],
+) -> Result<(), ProofError> {
     match phase.state {
         PhaseState::Finalized => {
             let price = phase.finalized_price_q9.ok_or(ProofError::InvalidPrice)?;
@@ -437,9 +467,28 @@ fn validate_phase(phase: &PhaseProof, source_kind: SourceKind) -> Result<(), Pro
                 attestors.push(report.attestor.as_str());
             }
             if let Some(evidence) = &phase.pyth_evidence {
+                let expected_target_timestamp_us = u64::try_from(target_seconds)
+                    .ok()
+                    .and_then(|seconds| seconds.checked_mul(1_000_000))
+                    .unwrap_or_default();
                 if evidence.feed_id == 0
+                    || evidence.target_timestamp_us == 0
+                    || evidence.target_timestamp_us != expected_target_timestamp_us
+                    || evidence
+                        .payload_timestamp_us
+                        .abs_diff(evidence.target_timestamp_us)
+                        > evidence.max_payload_timestamp_delta_us
                     || evidence.payload_timestamp_us < evidence.feed_update_timestamp_us
+                    || evidence.payload_timestamp_us - evidence.feed_update_timestamp_us
+                        > evidence.max_feed_age_us
                     || evidence.price_mantissa <= 0
+                    || evidence.verifier_program != PYTH_DEVNET_VERIFIER_PROGRAM
+                    || evidence.verifier_transaction_signature.trim().is_empty()
+                    || !transaction_signatures
+                        .iter()
+                        .any(|signature| signature == &evidence.verifier_transaction_signature)
+                    || confidence_bps(evidence.price_mantissa, evidence.confidence_mantissa)
+                        .is_none_or(|value| value > u64::from(evidence.max_confidence_bps))
                     || evidence.normalized_price_q9 != price
                     || evidence.payload_hash.len() != 64
                     || !evidence
@@ -447,7 +496,7 @@ fn validate_phase(phase: &PhaseProof, source_kind: SourceKind) -> Result<(), Pro
                         .bytes()
                         .all(|byte| byte.is_ascii_hexdigit())
                 {
-                    return Err(ProofError::InvalidPrice);
+                    return Err(ProofError::InvalidPythEvidence);
                 }
             }
         }
@@ -462,6 +511,23 @@ fn validate_phase(phase: &PhaseProof, source_kind: SourceKind) -> Result<(), Pro
         }
     }
     Ok(())
+}
+
+fn confidence_bps(price_mantissa: i64, confidence_mantissa: u64) -> Option<u64> {
+    if price_mantissa <= 0 {
+        return None;
+    }
+    // Public proof validation must use the same fail-closed rounding rule as
+    // the program, otherwise an invalid on-chain confidence bound could be
+    // rendered as an apparently valid proof.
+    let denominator = i128::from(price_mantissa);
+    let numerator = i128::from(confidence_mantissa).checked_mul(10_000)?;
+    u64::try_from(
+        numerator
+            .checked_add(denominator.checked_sub(1)?)?
+            .checked_div(denominator)?,
+    )
+    .ok()
 }
 
 fn validate_battle(
@@ -749,6 +815,10 @@ mod tests {
     }
 
     fn pyth_phase(price: i64) -> PhaseProof {
+        pyth_phase_at(price, 1_000_000)
+    }
+
+    fn pyth_phase_at(price: i64, target_timestamp_us: u64) -> PhaseProof {
         PhaseProof {
             state: PhaseState::Finalized,
             finalized_price_q9: Some(price),
@@ -756,13 +826,19 @@ mod tests {
             evidence_commitment: Some("pyth-commitment".to_owned()),
             pyth_evidence: Some(PythEvidenceProof {
                 feed_id: 42,
-                payload_timestamp_us: 1_000_000,
-                feed_update_timestamp_us: 1_000_000,
+                target_timestamp_us,
+                payload_timestamp_us: target_timestamp_us,
+                feed_update_timestamp_us: target_timestamp_us,
                 price_mantissa: price,
                 confidence_mantissa: 1,
                 exponent: -9,
                 normalized_price_q9: price,
                 payload_hash: "00".repeat(32),
+                max_payload_timestamp_delta_us: 1,
+                max_feed_age_us: 1,
+                max_confidence_bps: 100,
+                verifier_program: PYTH_DEVNET_VERIFIER_PROGRAM.to_owned(),
+                verifier_transaction_signature: "pyth-verifier-signature".to_owned(),
             }),
         }
     }
@@ -776,6 +852,8 @@ mod tests {
                 price_policy_version: 1,
                 quality_policy_version: 1,
                 attestor_set_version: 1,
+                start_target_at: 1,
+                end_target_at: 2,
                 source_kind: SourceKind::JupiterTokenSpotV1,
                 settlement_transaction_signature: "settlement-signature".to_owned(),
                 state: RoundState::Finalized,
@@ -797,7 +875,11 @@ mod tests {
                 display_return: Some("10.00%".to_owned()),
             }],
             battle: None,
-            transaction_signatures: vec!["signature".to_owned(), "settlement-signature".to_owned()],
+            transaction_signatures: vec![
+                "signature".to_owned(),
+                "settlement-signature".to_owned(),
+                "pyth-verifier-signature".to_owned(),
+            ],
             indexed_slot: 42,
             chain_slot: 42,
             chain_reconciled: true,
@@ -840,7 +922,7 @@ mod tests {
         proof.market_round.source_kind = SourceKind::PythProVerifiedV1;
         proof.round_assets[0].source_kind = SourceKind::PythProVerifiedV1;
         proof.round_assets[0].start = pyth_phase(100_000_000_000);
-        proof.round_assets[0].end = pyth_phase(110_000_000_000);
+        proof.round_assets[0].end = pyth_phase_at(110_000_000_000, 2_000_000);
         assert_eq!(
             proof.into_public().unwrap().source_trust_label,
             PYTH_SETTLEMENT_TRUST_LABEL
@@ -854,6 +936,68 @@ mod tests {
             ..phase(100_000_000_000)
         };
         assert_eq!(missing.validate(), Err(ProofError::InvalidReportSet));
+    }
+
+    #[test]
+    fn pyth_proof_rejects_an_unpinned_verifier_or_missing_verifier_transaction() {
+        let mut wrong_program = snapshot();
+        wrong_program.market_round.source_kind = SourceKind::PythProVerifiedV1;
+        wrong_program.round_assets[0].source_kind = SourceKind::PythProVerifiedV1;
+        wrong_program.round_assets[0].start = pyth_phase(100_000_000_000);
+        wrong_program.round_assets[0].end = pyth_phase_at(110_000_000_000, 2_000_000);
+        wrong_program.round_assets[0]
+            .start
+            .pyth_evidence
+            .as_mut()
+            .unwrap()
+            .verifier_program = "attacker-program".to_owned();
+        assert_eq!(
+            wrong_program.validate(),
+            Err(ProofError::InvalidPythEvidence)
+        );
+
+        let mut missing_transaction = snapshot();
+        missing_transaction.market_round.source_kind = SourceKind::PythProVerifiedV1;
+        missing_transaction.round_assets[0].source_kind = SourceKind::PythProVerifiedV1;
+        missing_transaction.round_assets[0].start = pyth_phase(100_000_000_000);
+        missing_transaction.round_assets[0].end = pyth_phase_at(110_000_000_000, 2_000_000);
+        missing_transaction
+            .transaction_signatures
+            .retain(|signature| signature != "pyth-verifier-signature");
+        assert_eq!(
+            missing_transaction.validate(),
+            Err(ProofError::InvalidPythEvidence)
+        );
+    }
+
+    #[test]
+    fn pyth_proof_rejects_confidence_that_exceeds_the_policy_after_rounding_up() {
+        let mut proof = snapshot();
+        proof.market_round.source_kind = SourceKind::PythProVerifiedV1;
+        proof.round_assets[0].source_kind = SourceKind::PythProVerifiedV1;
+        proof.round_assets[0].start = pyth_phase(100_000_000_000);
+        proof.round_assets[0].end = pyth_phase_at(110_000_000_000, 2_000_000);
+        let evidence = proof.round_assets[0].start.pyth_evidence.as_mut().unwrap();
+        evidence.price_mantissa = 3;
+        evidence.confidence_mantissa = 1;
+        evidence.max_confidence_bps = 3_333;
+        assert_eq!(proof.validate(), Err(ProofError::InvalidPythEvidence));
+    }
+
+    #[test]
+    fn pyth_proof_rejects_evidence_not_bound_to_the_frozen_phase_target() {
+        let mut proof = snapshot();
+        proof.market_round.source_kind = SourceKind::PythProVerifiedV1;
+        proof.round_assets[0].source_kind = SourceKind::PythProVerifiedV1;
+        proof.round_assets[0].start = pyth_phase(100_000_000_000);
+        proof.round_assets[0].end = pyth_phase_at(110_000_000_000, 2_000_000);
+        proof.round_assets[0]
+            .start
+            .pyth_evidence
+            .as_mut()
+            .unwrap()
+            .target_timestamp_us = 2_000_000;
+        assert_eq!(proof.validate(), Err(ProofError::InvalidPythEvidence));
     }
 
     #[test]

@@ -878,10 +878,14 @@ fn confidence_bps(price_mantissa: i64, confidence_mantissa: u64) -> Option<u64> 
     if price_mantissa <= 0 {
         return None;
     }
+    // Round upward so a fractional ratio above the configured limit cannot
+    // pass because integer division truncated the excess away.
+    let denominator = i128::from(price_mantissa);
+    let numerator = i128::from(confidence_mantissa).checked_mul(10_000)?;
     u64::try_from(
-        i128::from(confidence_mantissa)
-            .checked_mul(10_000)?
-            .checked_div(i128::from(price_mantissa))?,
+        numerator
+            .checked_add(denominator.checked_sub(1)?)?
+            .checked_div(denominator)?,
     )
     .ok()
 }
@@ -981,6 +985,13 @@ mod tests {
         assert_eq!(confidence_bps(1_000, 1), Some(10));
         assert_eq!(confidence_bps(1_000, 0), Some(0));
         assert_eq!(confidence_bps(0, 1), None);
+    }
+
+    #[test]
+    fn pyth_confidence_bound_rounds_up_instead_of_accepting_a_fractional_overage() {
+        // A 1/3 confidence ratio is 3333.33 basis points. Rounding down to
+        // 3333 would incorrectly pass a policy capped at exactly 3333 bps.
+        assert_eq!(confidence_bps(3, 1), Some(3_334));
     }
 
     #[test]

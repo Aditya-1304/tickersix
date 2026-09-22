@@ -73,6 +73,28 @@ pub struct PythFinalizeAccounts {
     pub finalizer: [u8; 32],
 }
 
+/// Public accounts for the source-specific Pyth fail-closed transition.
+#[cfg(feature = "pyth-pro")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PythUnavailableAccounts {
+    pub round_asset: [u8; 32],
+    pub market_round: [u8; 32],
+    pub settlement_policy: [u8; 32],
+    pub pyth_source_config: [u8; 32],
+    pub marker: [u8; 32],
+}
+
+/// Public accounts for permissionless completion of a Pyth-backed round.
+#[cfg(feature = "pyth-pro")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PythMarketRoundFinalizeAccounts {
+    pub market_round: [u8; 32],
+    pub settlement_policy: [u8; 32],
+    pub pyth_source_config: [u8; 32],
+    pub market_quality_policy: [u8; 32],
+    pub keeper: [u8; 32],
+}
+
 /// Accounts required by the coordinator to admit one official Ranked Battle.
 /// The coordinator signer is supplied by the caller; this crate never stores
 /// or selects a coordinator private key.
@@ -309,6 +331,53 @@ pub fn build_finalize_pyth_price_phase_instruction(
             signer(address(accounts.finalizer)),
         ],
         data: tickersix::instruction::FinalizePythPricePhase { phase }.data(),
+    }
+}
+
+/// Builds the permissionless Pyth unavailable transition. It contains no
+/// price payload and cannot route a frozen Pyth round through Jupiter.
+#[cfg(feature = "pyth-pro")]
+pub fn build_mark_pyth_price_phase_unavailable_instruction(
+    accounts: PythUnavailableAccounts,
+    phase: PricePhase,
+) -> Instruction {
+    Instruction {
+        program_id: address(tickersix::ID.to_bytes()),
+        accounts: vec![
+            writable(address(accounts.round_asset)),
+            readonly(address(accounts.market_round)),
+            readonly(address(accounts.settlement_policy)),
+            readonly(address(accounts.pyth_source_config)),
+            signer(address(accounts.marker)),
+        ],
+        data: tickersix::instruction::MarkPythPricePhaseUnavailable { phase }.data(),
+    }
+}
+
+/// Builds the source-specific Pyth round finalizer and appends the complete
+/// frozen RoundAsset set in canonical caller order.
+#[cfg(feature = "pyth-pro")]
+pub fn build_finalize_pyth_market_round_instruction(
+    accounts: PythMarketRoundFinalizeAccounts,
+    round_assets: &[[u8; 32]],
+) -> Instruction {
+    let mut account_metas = vec![
+        writable(address(accounts.market_round)),
+        readonly(address(accounts.settlement_policy)),
+        readonly(address(accounts.pyth_source_config)),
+        readonly(address(accounts.market_quality_policy)),
+        signer(address(accounts.keeper)),
+    ];
+    account_metas.extend(
+        round_assets
+            .iter()
+            .copied()
+            .map(|round_asset| readonly(address(round_asset))),
+    );
+    Instruction {
+        program_id: address(tickersix::ID.to_bytes()),
+        accounts: account_metas,
+        data: tickersix::instruction::FinalizePythMarketRound {}.data(),
     }
 }
 

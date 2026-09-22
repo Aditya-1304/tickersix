@@ -10,9 +10,9 @@ use std::{error::Error, fmt, fs, path::Path};
 
 use serde::{Deserialize, Serialize};
 
-/// Phase 2 Slice 1 only dispatches the permanent Jupiter baseline. Pyth is
-/// represented so snapshots can be rejected explicitly until its Gate 0B
-/// verification path is enabled in Slice 2.
+/// Phase 2 dispatches only the source selected by the frozen Market Round.
+/// Jupiter is the permanent baseline; Pyth remains explicitly gated by the
+/// Gate 0B result carried in the settlement snapshot.
 pub use crate::proof::SourceKind as SettlementSourceKind;
 
 fn default_settlement_source() -> SettlementSourceKind {
@@ -73,6 +73,10 @@ pub struct SettlementSnapshot {
     /// is unsafe because it can route a valid snapshot to the wrong verifier.
     #[serde(default = "default_settlement_source")]
     pub source_kind: SettlementSourceKind,
+    /// Operational Gate 0B result supplied by the checked-in Pyth evidence
+    /// gate. It defaults to false so a missing gate cannot enable Pyth.
+    #[serde(default)]
+    pub pyth_gate_0b_verified: bool,
     pub now_unix_secs: i64,
     pub round_state: RoundState,
     pub rated_battle_count: u32,
@@ -87,16 +91,20 @@ pub enum SettlementAction {
     AdvanceRoundToSettling,
     FinalizeJupiterPhase { asset_id: u16, phase: Phase },
     MarkJupiterPhaseUnavailable { asset_id: u16, phase: Phase },
+    FinalizePythPhase { asset_id: u16, phase: Phase },
+    MarkPythPhaseUnavailable { asset_id: u16, phase: Phase },
     ForfeitBattle { battle_id: u64 },
     VoidBattlePriceUnavailable { battle_id: u64 },
     SettleSideScore { battle_id: u64, side_index: u8 },
     FinalizeBattle { battle_id: u64 },
     FinalizeMarketRound,
+    FinalizePythMarketRound,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SettlementError {
     UnsupportedSource,
+    PythGateNotPassed,
     DuplicateAsset,
     DuplicateBattle,
     InvalidBattleAsset,
@@ -108,8 +116,9 @@ impl fmt::Display for SettlementError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
             Self::UnsupportedSource => {
-                "settlement source is not enabled by the Jupiter Phase 2 slice"
+                "settlement source is not enabled by the Phase 2 settlement path"
             }
+            Self::PythGateNotPassed => "Pyth settlement is disabled until Gate 0B is verified",
             Self::DuplicateAsset => "settlement snapshot contains a duplicate asset",
             Self::DuplicateBattle => "settlement snapshot contains a duplicate Battle",
             Self::InvalidBattleAsset => "Battle references an invalid or duplicate asset",
@@ -149,6 +158,7 @@ pub fn plan_settlement(
             asset.start_deadline,
             asset.start_has_compatible_quorum,
             snapshot.now_unix_secs,
+            snapshot.source_kind,
         );
         plan_phase(
             &mut actions,
@@ -158,6 +168,7 @@ pub fn plan_settlement(
             asset.end_deadline,
             asset.end_has_compatible_quorum,
             snapshot.now_unix_secs,
+            snapshot.source_kind,
         );
     }
 
@@ -205,7 +216,11 @@ pub fn plan_settlement(
     });
     let all_battles_resolved = snapshot.resolved_battle_count == snapshot.rated_battle_count;
     if all_assets_resolved && all_battles_resolved && actions.is_empty() {
-        actions.push(SettlementAction::FinalizeMarketRound);
+        actions.push(match snapshot.source_kind {
+            SettlementSourceKind::JupiterTokenSpotV1 => SettlementAction::FinalizeMarketRound,
+            SettlementSourceKind::PythProVerifiedV1 => SettlementAction::FinalizePythMarketRound,
+            _ => return Ok(actions),
+        });
     }
     Ok(actions)
 }
@@ -218,15 +233,27 @@ fn plan_phase(
     deadline: i64,
     has_compatible_quorum: bool,
     now: i64,
+    source_kind: SettlementSourceKind,
 ) {
     if status != PhaseStatus::Pending || now <= deadline {
         return;
     }
-    if has_compatible_quorum {
-        actions.push(SettlementAction::FinalizeJupiterPhase { asset_id, phase });
-    } else {
-        actions.push(SettlementAction::MarkJupiterPhaseUnavailable { asset_id, phase });
-    }
+    let action = match (source_kind, has_compatible_quorum) {
+        (SettlementSourceKind::JupiterTokenSpotV1, true) => {
+            SettlementAction::FinalizeJupiterPhase { asset_id, phase }
+        }
+        (SettlementSourceKind::JupiterTokenSpotV1, false) => {
+            SettlementAction::MarkJupiterPhaseUnavailable { asset_id, phase }
+        }
+        (SettlementSourceKind::PythProVerifiedV1, true) => {
+            SettlementAction::FinalizePythPhase { asset_id, phase }
+        }
+        (SettlementSourceKind::PythProVerifiedV1, false) => {
+            SettlementAction::MarkPythPhaseUnavailable { asset_id, phase }
+        }
+        _ => return,
+    };
+    actions.push(action);
 }
 
 fn all_assets_available(asset_ids: &[u16], assets: &[AssetSettlementState]) -> bool {
@@ -240,8 +267,11 @@ fn all_assets_available(asset_ids: &[u16], assets: &[AssetSettlementState]) -> b
 }
 
 fn validate_snapshot(snapshot: &SettlementSnapshot) -> Result<(), SettlementError> {
-    if snapshot.source_kind != SettlementSourceKind::JupiterTokenSpotV1 {
-        return Err(SettlementError::UnsupportedSource);
+    match snapshot.source_kind {
+        SettlementSourceKind::JupiterTokenSpotV1 => {}
+        SettlementSourceKind::PythProVerifiedV1 if snapshot.pyth_gate_0b_verified => {}
+        SettlementSourceKind::PythProVerifiedV1 => return Err(SettlementError::PythGateNotPassed),
+        _ => return Err(SettlementError::UnsupportedSource),
     }
     let mut asset_ids = Vec::with_capacity(snapshot.assets.len());
     for asset in &snapshot.assets {
@@ -328,6 +358,7 @@ mod tests {
     fn planner_is_deterministic_and_emits_no_action_for_resolved_state() {
         let snapshot = SettlementSnapshot {
             source_kind: SettlementSourceKind::JupiterTokenSpotV1,
+            pyth_gate_0b_verified: false,
             now_unix_secs: 40,
             round_state: RoundState::Finalized,
             rated_battle_count: 1,
@@ -349,6 +380,7 @@ mod tests {
         failed_asset.end_has_compatible_quorum = false;
         let snapshot = SettlementSnapshot {
             source_kind: SettlementSourceKind::JupiterTokenSpotV1,
+            pyth_gate_0b_verified: false,
             now_unix_secs: 40,
             round_state: RoundState::Settling,
             rated_battle_count: 1,
@@ -376,7 +408,8 @@ mod tests {
     #[test]
     fn planner_fails_closed_for_sources_not_enabled_in_jupiter_slice() {
         let snapshot = SettlementSnapshot {
-            source_kind: SettlementSourceKind::PythProVerifiedV1,
+            source_kind: SettlementSourceKind::Pyth247IndexV1,
+            pyth_gate_0b_verified: false,
             now_unix_secs: 40,
             round_state: RoundState::Settling,
             rated_battle_count: 1,
@@ -391,6 +424,78 @@ mod tests {
         assert_eq!(
             plan_settlement(&snapshot),
             Err(SettlementError::UnsupportedSource)
+        );
+    }
+
+    #[test]
+    fn planner_rejects_pyth_until_gate_0b_is_explicitly_verified() {
+        let snapshot = SettlementSnapshot {
+            source_kind: SettlementSourceKind::PythProVerifiedV1,
+            pyth_gate_0b_verified: false,
+            now_unix_secs: 40,
+            round_state: RoundState::Settling,
+            rated_battle_count: 1,
+            resolved_battle_count: 1,
+            assets: (1..=6).map(asset).collect(),
+            battles: vec![BattleSettlementState {
+                result_pending: false,
+                ..battle()
+            }],
+        };
+
+        assert_eq!(
+            plan_settlement(&snapshot),
+            Err(SettlementError::PythGateNotPassed)
+        );
+    }
+
+    #[test]
+    fn planner_emits_source_specific_pyth_phase_actions_after_gate_0b() {
+        let mut pending = asset(1);
+        pending.start = PhaseStatus::Pending;
+        pending.start_deadline = 20;
+        let snapshot = SettlementSnapshot {
+            source_kind: SettlementSourceKind::PythProVerifiedV1,
+            pyth_gate_0b_verified: true,
+            now_unix_secs: 40,
+            round_state: RoundState::Settling,
+            rated_battle_count: 1,
+            resolved_battle_count: 1,
+            assets: std::iter::once(pending).chain((2..=6).map(asset)).collect(),
+            battles: vec![BattleSettlementState {
+                result_pending: false,
+                ..battle()
+            }],
+        };
+
+        assert_eq!(
+            plan_settlement(&snapshot).unwrap(),
+            vec![SettlementAction::FinalizePythPhase {
+                asset_id: 1,
+                phase: Phase::Start,
+            }]
+        );
+    }
+
+    #[test]
+    fn planner_uses_the_pyth_round_finalizer_after_all_pyth_work_resolves() {
+        let snapshot = SettlementSnapshot {
+            source_kind: SettlementSourceKind::PythProVerifiedV1,
+            pyth_gate_0b_verified: true,
+            now_unix_secs: 40,
+            round_state: RoundState::Settling,
+            rated_battle_count: 1,
+            resolved_battle_count: 1,
+            assets: (1..=6).map(asset).collect(),
+            battles: vec![BattleSettlementState {
+                result_pending: false,
+                ..battle()
+            }],
+        };
+
+        assert_eq!(
+            plan_settlement(&snapshot).unwrap(),
+            vec![SettlementAction::FinalizePythMarketRound]
         );
     }
 }
