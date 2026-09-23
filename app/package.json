@@ -1,0 +1,9 @@
+{
+  "name": "tickersix-stocklana-app",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Dependency-free TickerSix consumer surface for Solana Devnet.",
+  "scripts": {
+    "check": "node check.mjs"
+  }
+}

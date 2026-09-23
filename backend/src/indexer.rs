@@ -300,6 +300,19 @@ pub async fn upsert_battle(pool: &PgPool, battle: &IndexedBattle) -> Result<(), 
     .execute(pool)
     .await
     .map_err(storage_error)?;
+
+    if matches!(battle.state.as_str(), "FINALIZED" | "SETTLED" | "VOIDED") {
+        crate::replay::record_final_event(
+            pool,
+            &battle.chain_pubkey,
+            battle.indexed_at,
+            battle.indexed_at,
+            battle.score_a_q9,
+            battle.score_b_q9,
+        )
+        .await
+        .map_err(|error| IndexerError::Storage(error.to_string()))?;
+    }
     Ok(())
 }
 

@@ -30,6 +30,7 @@ use crate::{
     profile::{self, ProfileError, ProfileUpdate},
     proof::{self, ProofError},
     ranked::{self, RankedError},
+    replay::{self, ReplayError},
 };
 
 #[derive(Clone)]
@@ -74,6 +75,7 @@ pub fn router(state: ApiState) -> Router {
             get(get_market_round_proof),
         )
         .route("/v1/battles/:pubkey/proof", get(get_battle_proof))
+        .route("/v1/battles/:pubkey/replay", get(get_battle_replay))
         .route("/v1/leagues", get(list_leagues))
         .route("/v1/leagues/:id", get(get_league))
         .route("/v1/leagues/:id/join", post(join_league))
@@ -140,6 +142,7 @@ pub enum ApiError {
     Profile(ProfileError),
     Proof(ProofError),
     Ranked(RankedError),
+    Replay(ReplayError),
     DomainMismatch,
 }
 
@@ -153,6 +156,7 @@ impl fmt::Display for ApiError {
             Self::Profile(error) => write!(formatter, "{error}"),
             Self::Proof(error) => write!(formatter, "{error}"),
             Self::Ranked(error) => write!(formatter, "{error}"),
+            Self::Replay(error) => write!(formatter, "{error}"),
             Self::DomainMismatch => {
                 formatter.write_str("authentication domain does not match server configuration")
             }
@@ -235,6 +239,9 @@ impl IntoResponse for ApiError {
                 StatusCode::NOT_FOUND
             }
             Self::Proof(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::Replay(ReplayError::NotFound | ReplayError::Unavailable) => StatusCode::NOT_FOUND,
+            Self::Replay(ReplayError::InvalidBattle) => StatusCode::BAD_REQUEST,
+            Self::Replay(ReplayError::Storage(_)) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Auth(AuthError::Storage(_)) | Self::Profile(ProfileError::Storage(_)) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
@@ -294,6 +301,12 @@ impl From<ProofError> for ApiError {
 impl From<RankedError> for ApiError {
     fn from(error: RankedError) -> Self {
         Self::Ranked(error)
+    }
+}
+
+impl From<ReplayError> for ApiError {
+    fn from(error: ReplayError) -> Self {
+        Self::Replay(error)
     }
 }
 
@@ -478,6 +491,13 @@ async fn get_battle_proof(
 ) -> Result<Json<proof::PublicProof>, ApiError> {
     let request_path = format!("/v1/battles/{pubkey}/proof");
     Ok(Json(load_requested_proof(&state, &request_path)?))
+}
+
+async fn get_battle_replay(
+    State(state): State<ApiState>,
+    Path(pubkey): Path<String>,
+) -> Result<Json<replay::ReplayTimeline>, ApiError> {
+    Ok(Json(replay::get_replay(&state.pool, &pubkey).await?))
 }
 
 async fn list_leagues(
@@ -688,6 +708,10 @@ fn error_code(error: &ApiError) -> &'static str {
         ApiError::Live(LiveError::Storage(_)) => "INTERNAL_ERROR",
         ApiError::Proof(ProofError::NotConfigured | ProofError::PathMismatch) => "PROOF_NOT_FOUND",
         ApiError::Proof(_) => "PROOF_UNAVAILABLE",
+        ApiError::Replay(ReplayError::InvalidBattle) => "INVALID_BATTLE",
+        ApiError::Replay(ReplayError::NotFound) => "BATTLE_NOT_FOUND",
+        ApiError::Replay(ReplayError::Unavailable) => "REPLAY_UNAVAILABLE",
+        ApiError::Replay(ReplayError::Storage(_)) => "INTERNAL_ERROR",
         ApiError::Ranked(RankedError::Storage(_)) => "INTERNAL_ERROR",
         ApiError::Ranked(RankedError::RoundNotFound) => "ROUND_NOT_FOUND",
         ApiError::Ranked(RankedError::QueueNotFound) => "QUEUE_NOT_FOUND",

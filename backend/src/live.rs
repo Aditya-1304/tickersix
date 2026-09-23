@@ -103,6 +103,17 @@ pub async fn upsert_projection(
     .execute(pool)
     .await
     .map_err(storage_error)?;
+    crate::replay::record_projection_event(
+        pool,
+        battle_pubkey,
+        as_of,
+        as_of,
+        updated_at,
+        player_a_score_q9,
+        player_b_score_q9,
+    )
+    .await
+    .map_err(|error| LiveError::Storage(error.to_string()))?;
     Ok(())
 }
 

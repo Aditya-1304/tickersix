@@ -40,6 +40,7 @@ pub mod proof;
 pub mod ranked;
 pub mod rating;
 pub mod recovery;
+pub mod replay;
 pub mod settlement;
 pub mod standings;
 
