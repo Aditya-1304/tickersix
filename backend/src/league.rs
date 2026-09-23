@@ -11,6 +11,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fmt,
+    time::Instant,
 };
 
 use protocol::{league_pairing_seed, league_standings_input_hash, pair_swiss, PairingPlayer};
@@ -24,10 +25,10 @@ use sha2::{Digest, Sha256};
 use solana_instruction::Instruction;
 use sqlx::{postgres::PgRow, PgPool, Postgres, Row, Transaction};
 
-use crate::auth::parse_wallet;
 use crate::standings::{
     calculate_standings, LeagueBattleFact, LeagueBattleResult, LeagueByeFact, LeagueStanding,
 };
+use crate::{auth::parse_wallet, metrics};
 
 pub const MAX_LEAGUE_PLAYERS: i32 = 100;
 pub const PENDING_JOIN_TTL_SECS: i64 = 15 * 60;
@@ -819,6 +820,7 @@ pub async fn create_league_pairings(
     entropy: &PairingEntropy,
     now: i64,
 ) -> Result<LeaguePairingRun, LeagueError> {
+    let pairing_started = Instant::now();
     validate_league_id(league_id)?;
     if league_round_no <= 0 {
         return Err(LeagueError::InvalidPairing);
@@ -899,6 +901,7 @@ pub async fn create_league_pairings(
         return Err(LeagueError::InvalidPairing);
     }
     let bye_wallet = pairing.bye.map(|index| candidates[index].wallet.as_str());
+    let mut repeat_pairings = 0i64;
     let run_id = sqlx::query(
         "INSERT INTO league_pairing_runs
             (league_id, league_round_no, market_round_id, pairing_seed,
@@ -946,6 +949,9 @@ pub async fn create_league_pairings(
         let player_b = &candidates[right];
         let repeat_relaxed = player_a.prior_opponents.contains(&player_b.wallet_bytes)
             || player_b.prior_opponents.contains(&player_a.wallet_bytes);
+        if repeat_relaxed {
+            repeat_pairings += 1;
+        }
         let pairing_id = sqlx::query(
             "INSERT INTO league_pairings
                 (run_id, league_id, league_round_no, market_round_id,
@@ -990,6 +996,9 @@ pub async fn create_league_pairings(
         .map_err(storage_error)?;
     }
     transaction.commit().await.map_err(storage_error)?;
+    let duration_ms = i64::try_from(pairing_started.elapsed().as_millis()).unwrap_or(i64::MAX);
+    metrics::observe_league_pairing_duration(duration_ms);
+    metrics::increment("league_repeat_pairings_total", repeat_pairings);
     load_pairing_run(pool, run_id).await
 }
 
@@ -1165,6 +1174,7 @@ pub async fn confirm_league_coordinator_battle(
     if pairing_id <= 0 {
         return Err(LeagueError::InvalidPairing);
     }
+    metrics::increment("battle_commit_attempts_total", 1);
     let battle_bytes =
         parse_player_pubkey(battle_pubkey).map_err(|_| LeagueError::CoordinatorConflict)?;
     let mut transaction = pool.begin().await.map_err(storage_error)?;
@@ -1332,6 +1342,7 @@ pub async fn confirm_league_coordinator_battle(
         return Err(LeagueError::CoordinatorConflict);
     }
     transaction.commit().await.map_err(storage_error)?;
+    metrics::increment("battle_commit_success_total", 1);
     Ok(())
 }
 

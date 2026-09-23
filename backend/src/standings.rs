@@ -436,6 +436,8 @@ fn final_tie_break_key(seed: [u8; 32], wallet: [u8; 32]) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use protocol::{pair_swiss, PairingPlayer};
+    use std::collections::HashSet;
 
     fn player(id: u8) -> [u8; 32] {
         [id; 32]
@@ -493,5 +495,62 @@ mod tests {
         assert_eq!(standings[2].league_points, 3);
         assert_eq!(standings[2].byes, 1);
         assert_eq!(standings[3].wallet, player(2));
+    }
+
+    #[test]
+    fn standings_rebuild_five_rounds_for_one_hundred_players() {
+        let members = (0u8..100).map(|id| [id; 32]).collect::<Vec<_>>();
+        let mut prior_opponents = vec![Vec::<[u8; 32]>::new(); members.len()];
+        let mut league_points = vec![0u32; members.len()];
+        let mut battles = Vec::with_capacity(250);
+
+        for round in 1u8..=5 {
+            let players = members
+                .iter()
+                .enumerate()
+                .map(|(index, wallet)| PairingPlayer {
+                    wallet: *wallet,
+                    league_points: league_points[index],
+                    rating: 1500,
+                    bye_count: 0,
+                    prior_opponents: prior_opponents[index].clone(),
+                })
+                .collect::<Vec<_>>();
+            let pairing = pair_swiss(&players, [round; 32]).unwrap();
+            assert_eq!(pairing.pairs.len(), 50);
+            assert!(pairing.bye.is_none());
+
+            let mut round_players = HashSet::new();
+            for (left, right) in pairing.pairs {
+                assert!(round_players.insert(left));
+                assert!(round_players.insert(right));
+                battles.push(LeagueBattleFact {
+                    round_no: i32::from(round),
+                    player_a: members[left],
+                    player_b: members[right],
+                    result: LeagueBattleResult::PlayerA,
+                    score_a_q9: Some(2_000_000),
+                    score_b_q9: Some(1_000_000),
+                });
+                prior_opponents[left].push(members[right]);
+                prior_opponents[right].push(members[left]);
+                league_points[left] += 3;
+            }
+            assert_eq!(round_players.len(), members.len());
+        }
+
+        let standings = calculate_standings(&members, &battles, &[], [9; 32]).unwrap();
+        assert_eq!(standings.len(), 100);
+        assert_eq!(
+            standings
+                .iter()
+                .map(|standing| standing.wallet)
+                .collect::<HashSet<_>>()
+                .len(),
+            100
+        );
+        for standing in standings {
+            assert_eq!(standing.wins + standing.draws + standing.losses, 5);
+        }
     }
 }

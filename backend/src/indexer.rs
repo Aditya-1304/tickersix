@@ -101,6 +101,7 @@ pub struct IndexedBattle {
     pub market_round_id: i64,
     pub mode: String,
     pub rated: bool,
+    pub settlement_source_kind: Option<String>,
     pub player_a: String,
     pub player_b: String,
     pub state: String,
@@ -249,24 +250,30 @@ pub async fn upsert_battle(pool: &PgPool, battle: &IndexedBattle) -> Result<(), 
     sqlx::query(
         "INSERT INTO battles
             (chain_pubkey, market_round_id, mode, rated,
-             player_a, player_b, state, result, score_a_q9, score_b_q9, indexed_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+             settlement_source_kind, player_a, player_b, state, result,
+             score_a_q9, score_b_q9, indexed_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
          ON CONFLICT (chain_pubkey) DO UPDATE SET
              market_round_id = EXCLUDED.market_round_id,
              mode = EXCLUDED.mode,
              rated = EXCLUDED.rated,
+             settlement_source_kind = COALESCE(
+                 EXCLUDED.settlement_source_kind, battles.settlement_source_kind
+             ),
              player_a = EXCLUDED.player_a,
              player_b = EXCLUDED.player_b,
              state = EXCLUDED.state,
              result = EXCLUDED.result,
              score_a_q9 = EXCLUDED.score_a_q9,
              score_b_q9 = EXCLUDED.score_b_q9,
-             indexed_at = EXCLUDED.indexed_at",
+             indexed_at = EXCLUDED.indexed_at
+         WHERE battles.indexed_at <= EXCLUDED.indexed_at",
     )
     .bind(&battle.chain_pubkey)
     .bind(battle.market_round_id)
     .bind(&battle.mode)
     .bind(battle.rated)
+    .bind(&battle.settlement_source_kind)
     .bind(&battle.player_a)
     .bind(&battle.player_b)
     .bind(&battle.state)
@@ -354,6 +361,7 @@ pub async fn record_account_observation(
              account_kind = EXCLUDED.account_kind,
              slot = EXCLUDED.slot,
              data_hash = EXCLUDED.data_hash,
+             indexed_at = EXCLUDED.indexed_at
              indexed_at = EXCLUDED.indexed_at",
     )
     .bind(account_pubkey)
@@ -425,6 +433,7 @@ mod tests {
             market_round_id: 3,
             mode: "LEAGUE".to_owned(),
             rated: true,
+            settlement_source_kind: Some("JUPITER_TOKEN_SPOT_V1".to_owned()),
             player_a: bs58::encode([1; 32]).into_string(),
             player_b: bs58::encode([2; 32]).into_string(),
             state: "FINALIZED".to_owned(),

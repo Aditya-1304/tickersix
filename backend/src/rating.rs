@@ -7,6 +7,7 @@
 
 use std::{collections::BTreeMap, fmt};
 
+use crate::metrics;
 use protocol::{apply_elo_update, EloOutcome, MathError, RATING_FLOOR};
 use serde::Serialize;
 use sqlx::{postgres::PgRow, PgPool, Postgres, Row, Transaction};
@@ -124,13 +125,12 @@ pub async fn apply_next(pool: &PgPool, now: i64) -> Result<Option<RatingApplyRes
         )
         .await?;
         validate_coordinator_snapshots(&battle, &states)?;
-
         let result = match resolution {
             RatingResolution::Played => {
-                apply_played(&mut transaction, season_id, &battle, &mut states, now).await?
+                apply_played(&mut transaction, season_id, &battle, &mut states, now).await
             }
             RatingResolution::ForfeitA => {
-                apply_forfeit(&mut transaction, season_id, &battle, &mut states, true, now).await?
+                apply_forfeit(&mut transaction, season_id, &battle, &mut states, true, now).await
             }
             RatingResolution::ForfeitB => {
                 apply_forfeit(
@@ -141,16 +141,26 @@ pub async fn apply_next(pool: &PgPool, now: i64) -> Result<Option<RatingApplyRes
                     false,
                     now,
                 )
-                .await?
+                .await
             }
             RatingResolution::BothForfeit => {
-                apply_both_forfeit(&mut transaction, season_id, &battle, &mut states, now).await?
+                apply_both_forfeit(&mut transaction, season_id, &battle, &mut states, now).await
             }
             RatingResolution::Void | RatingResolution::Unsupported => {
                 return Err(RatingError::InvalidResult)
             }
         };
+        let result = match result {
+            Ok(result) => result,
+            Err(error) => {
+                metrics::increment("rating_event_failures_total", 1);
+                return Err(error);
+            }
+        };
         transaction.commit().await.map_err(storage_error)?;
+        if result.event_kind == FORFEIT_EVENT_KIND {
+            metrics::increment("forfeit_total", i64::from(result.events_created));
+        }
         return Ok(Some(result));
     }
 

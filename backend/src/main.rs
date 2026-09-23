@@ -30,9 +30,11 @@ pub mod attestor;
 pub mod auth;
 pub mod db;
 pub mod indexer;
+pub mod jobs;
 pub mod leaderboard;
 pub mod league;
 pub mod live;
+pub mod metrics;
 pub mod profile;
 pub mod proof;
 pub mod ranked;
@@ -191,6 +193,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Some("api-serve") => api::serve_from_env().await?,
         Some("ranked-match") => run_ranked_match().await?,
         Some("rating-apply") => run_rating_apply().await?,
+        Some("scheduler-once") => run_scheduler_once().await?,
+        Some("scheduler") => run_scheduler().await?,
         Some("proof-serve") => {
             let path = env::args()
                 .nth(2)
@@ -572,6 +576,40 @@ async fn run_rating_apply() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+async fn open_worker_pool() -> Result<sqlx::PgPool, Box<dyn Error>> {
+    let database_url = env::var("TICKERSIX_DATABASE_URL")
+        .map_err(|_| "TICKERSIX_DATABASE_URL must point to PostgreSQL")?;
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&database_url)
+        .await?;
+    db::run_migrations(&pool).await?;
+    Ok(pool)
+}
+
+async fn run_scheduler_once() -> Result<(), Box<dyn Error>> {
+    let pool = open_worker_pool().await?;
+    let result = jobs::run_once(&pool, auth::unix_now()).await?;
+    println!("{}", serde_json::to_string_pretty(&result)?);
+    Ok(())
+}
+
+async fn run_scheduler() -> Result<(), Box<dyn Error>> {
+    let pool = open_worker_pool().await?;
+    let interval_secs = env::var("TICKERSIX_SCHEDULER_INTERVAL_SECS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(5)
+        .max(1);
+    loop {
+        match jobs::run_once(&pool, auth::unix_now()).await {
+            Ok(result) => println!("{}", serde_json::to_string(&result)?),
+            Err(error) => eprintln!("scheduler tick failed: {error}"),
+        }
+        tokio::time::sleep(Duration::from_secs(interval_secs)).await;
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct RecorderLineOwned {
     #[serde(default)]
@@ -841,6 +879,8 @@ Attestor worker: TICKERSIX_ATTESTOR_CONFIG=attestor.json cargo run -p backend --
 HTTP API: TICKERSIX_DATABASE_URL=postgres://... cargo run -p backend -- api-serve
 Ranked matcher: TICKERSIX_DATABASE_URL=postgres://... cargo run -p backend -- ranked-match <market_round_id>
 Rating worker: TICKERSIX_DATABASE_URL=postgres://... cargo run -p backend -- rating-apply
+Scheduler once: TICKERSIX_DATABASE_URL=postgres://... cargo run -p backend -- scheduler-once
+Scheduler loop: TICKERSIX_DATABASE_URL=postgres://... TICKERSIX_SCHEDULER_INTERVAL_SECS=5 cargo run -p backend -- scheduler
 Settlement planner: cargo run -p backend -- settlement-plan settlement.json
 Proof endpoint: cargo run -p backend -- proof-serve proof.json [bind]"#
     );

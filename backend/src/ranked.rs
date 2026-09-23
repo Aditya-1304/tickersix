@@ -14,7 +14,7 @@ use relay::{
 use serde::Serialize;
 use sqlx::{postgres::PgRow, PgPool, Postgres, Row, Transaction};
 
-use crate::auth::parse_wallet;
+use crate::{auth::parse_wallet, metrics};
 
 pub const PAIRING_POLICY_VERSION: i32 = 1;
 pub use crate::rating::RATING_FORMULA_VERSION;
@@ -305,12 +305,7 @@ pub async fn run_matchmaker(
     let mut transaction = pool.begin().await.map_err(storage_error)?;
     lock_matchmaker_round(&mut transaction, market_round_id).await?;
     let round = load_round(&mut transaction, market_round_id).await?;
-    if now < round.queue_close_at {
-        return Err(RankedError::QueueClosed);
-    }
-    if round.is_replay || !matches!(round.state.as_str(), "SCHEDULED" | "COMMIT_OPEN") {
-        return Err(RankedError::RoundNotEligible);
-    }
+    validate_matchmaker_window(&round, now)?;
 
     let cutoff_at = round.queue_close_at;
     if let Some(run_id) = find_match_run(&mut transaction, market_round_id, cutoff_at).await? {
@@ -331,6 +326,7 @@ pub async fn run_matchmaker(
     .await
     .map_err(storage_error)?;
 
+    metrics::set("ranked_queue_depth", queue_rows.len() as i64);
     let mut eligible = Vec::new();
     let mut blocked_wallets = Vec::new();
     for row in queue_rows {
@@ -414,6 +410,8 @@ pub async fn run_matchmaker(
             &player_b.wallet,
         )
         .await?;
+        metrics::increment("ranked_matches_created_total", 1);
+        metrics::observe_rating_gap((player_a.rating - player_b.rating).abs() as i64);
         pairings.push(RankedPairingView {
             pairing_id,
             player_a: player_a.wallet.clone(),
@@ -430,6 +428,7 @@ pub async fn run_matchmaker(
         .map(|index| eligible[index].wallet.clone())
         .into_iter()
         .collect::<Vec<_>>();
+    metrics::increment("ranked_unmatched_total", unmatched_wallets.len() as i64);
     for wallet in &unmatched_wallets {
         sqlx::query(
             "UPDATE ranked_queue SET status = 'UNMATCHED'
@@ -542,6 +541,7 @@ pub async fn confirm_coordinator_battle(
     now: i64,
 ) -> Result<(), RankedError> {
     let mut transaction = pool.begin().await.map_err(storage_error)?;
+    metrics::increment("battle_commit_attempts_total", 1);
     let row = sqlx::query(
         "SELECT market_round_id, player_a, player_b, rating_a_snapshot,
                 rating_b_snapshot, status, battle_pubkey,
@@ -670,6 +670,7 @@ pub async fn confirm_coordinator_battle(
     .await
     .map_err(storage_error)?;
     transaction.commit().await.map_err(storage_error)?;
+    metrics::increment("battle_commit_success_total", 1);
     Ok(())
 }
 
@@ -754,6 +755,23 @@ fn market_round_from_row(row: &PgRow) -> Result<NextMarketRound, RankedError> {
         return Err(RankedError::InvalidRound);
     }
     Ok(round)
+}
+
+fn validate_matchmaker_window(round: &NextMarketRound, now: i64) -> Result<(), RankedError> {
+    if round.queue_close_at >= round.start_target_at || round.start_target_at >= round.end_target_at
+    {
+        return Err(RankedError::InvalidRound);
+    }
+    if round.is_replay || !matches!(round.state.as_str(), "SCHEDULED" | "COMMIT_OPEN") {
+        return Err(RankedError::RoundNotEligible);
+    }
+    if now < round.queue_close_at {
+        return Err(RankedError::QueueClosed);
+    }
+    if now >= round.start_target_at {
+        return Err(RankedError::RoundNotEligible);
+    }
+    Ok(())
 }
 
 fn validate_queue_round(round: &NextMarketRound, now: i64) -> Result<(), RankedError> {
@@ -1164,6 +1182,25 @@ mod tests {
         assert_eq!(
             validate_queue_round(&round, 50),
             Err(RankedError::InvalidRound)
+        );
+    }
+
+    #[test]
+    fn matchmaker_rejects_a_round_after_its_start_window() {
+        let round = NextMarketRound {
+            id: 2,
+            chain_pubkey: None,
+            round_sequence: 2,
+            state: "COMMIT_OPEN".to_owned(),
+            is_replay: false,
+            queue_close_at: 100,
+            start_target_at: 200,
+            end_target_at: 300,
+        };
+
+        assert_eq!(
+            validate_matchmaker_window(&round, 200),
+            Err(RankedError::RoundNotEligible)
         );
     }
 

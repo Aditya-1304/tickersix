@@ -26,6 +26,7 @@ use crate::{
     leaderboard::{self, LeaderboardError},
     league::{self, LeagueError},
     live::{self, LiveError},
+    metrics,
     profile::{self, ProfileError, ProfileUpdate},
     ranked::{self, RankedError},
 };
@@ -71,6 +72,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/leaderboards/global", get(get_global_leaderboard))
         .route("/v1/leaderboards/global/me", get(get_my_leaderboard))
         .route("/v1/stream/battles/:pubkey", get(stream_battle))
+        .route("/metrics", get(get_metrics))
         .with_state(state)
 }
 
@@ -529,6 +531,17 @@ async fn get_my_leaderboard(
     Ok(Json(
         leaderboard::leaderboard_me(&state.pool, &wallet).await?,
     ))
+}
+
+async fn get_metrics() -> Response {
+    (
+        [(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("text/plain; version=0.0.4"),
+        )],
+        metrics::global().render(),
+    )
+        .into_response()
 }
 
 async fn stream_battle(
