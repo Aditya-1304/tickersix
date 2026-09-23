@@ -527,7 +527,10 @@ pub fn pair_ranked(players: &[RankedPlayer]) -> RankedPairingResult {
                 (
                     players[first]
                         .recent_opponents
-                        .contains(&players[**candidate].wallet),
+                        .contains(&players[**candidate].wallet)
+                        || players[**candidate]
+                            .recent_opponents
+                            .contains(&players[first].wallet),
                     (i64::from(players[first].rating) - i64::from(players[**candidate].rating))
                         .unsigned_abs(),
                     players[**candidate].rating,

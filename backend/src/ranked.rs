@@ -82,6 +82,7 @@ pub struct QueueEntry {
     pub tier: String,
     pub matchmaking_rating_status: &'static str,
     pub rating_snapshot: Option<i32>,
+    pub rated_games_snapshot: Option<i32>,
     pub rating_snapshot_at: Option<i64>,
     pub joined_at: i64,
     pub queue_closes_at: i64,
@@ -156,6 +157,7 @@ pub async fn join_queue(
     parse_wallet(wallet).map_err(|_| RankedError::InvalidWallet)?;
     let mut transaction = pool.begin().await.map_err(storage_error)?;
     lock_matchmaker_round(&mut transaction, market_round_id).await?;
+    lock_ranked_wallet(&mut transaction, wallet).await?;
     let round = load_round(&mut transaction, market_round_id).await?;
     validate_queue_round(&round, now)?;
 
@@ -189,7 +191,8 @@ pub async fn join_queue(
             _ => {
                 sqlx::query(
                     "UPDATE ranked_queue
-                     SET status = 'QUEUED', rating_snapshot = NULL, rating_snapshot_at = NULL
+                     SET status = 'QUEUED', rating_snapshot = NULL,
+                         rated_games_snapshot = NULL, rating_snapshot_at = NULL
                      WHERE market_round_id = $1 AND wallet = $2",
                 )
                 .bind(market_round_id)
@@ -225,15 +228,15 @@ pub async fn leave_queue(
     now: i64,
 ) -> Result<(), RankedError> {
     parse_wallet(wallet).map_err(|_| RankedError::InvalidWallet)?;
-    let queue_close_at = sqlx::query("SELECT queue_close_at FROM market_rounds WHERE id = $1")
-        .bind(market_round_id)
-        .fetch_optional(pool)
-        .await
-        .map_err(storage_error)?
-        .ok_or(RankedError::RoundNotFound)?
-        .try_get::<i64, _>("queue_close_at")
-        .map_err(storage_error)?;
-    if now >= queue_close_at {
+    // Queue cancellation participates in the same per-round critical section
+    // as admission and matching. Without this lock, the matchmaker could
+    // snapshot a wallet between the cutoff read and the cancellation update,
+    // producing a Battle for a player whose leave request appeared to win.
+    let mut transaction = pool.begin().await.map_err(storage_error)?;
+    lock_matchmaker_round(&mut transaction, market_round_id).await?;
+    lock_ranked_wallet(&mut transaction, wallet).await?;
+    let round = load_round(&mut transaction, market_round_id).await?;
+    if now >= round.queue_close_at {
         return Err(RankedError::QueueClosed);
     }
     let result = sqlx::query(
@@ -249,20 +252,22 @@ pub async fn leave_queue(
     .bind(market_round_id)
     .bind(wallet)
     .bind(now)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await
     .map_err(storage_error)?;
     if result.rows_affected() == 1 {
+        transaction.commit().await.map_err(storage_error)?;
         return Ok(());
     }
 
     let status = sqlx::query(
         "SELECT status FROM ranked_queue
-         WHERE market_round_id = $1 AND wallet = $2",
+         WHERE market_round_id = $1 AND wallet = $2
+         FOR UPDATE",
     )
     .bind(market_round_id)
     .bind(wallet)
-    .fetch_optional(pool)
+    .fetch_optional(&mut *transaction)
     .await
     .map_err(storage_error)?;
     match status {
@@ -330,14 +335,20 @@ pub async fn run_matchmaker(
     let mut blocked_wallets = Vec::new();
     for row in queue_rows {
         let wallet: String = row.try_get("wallet").map_err(storage_error)?;
-        let (rating, _rated_games) =
+        // League admission uses the same wallet advisory key. Holding it
+        // while checking reservations closes the cross-mode race where a
+        // League join and Ranked pairing could both pass their preflight.
+        lock_ranked_wallet(&mut transaction, &wallet).await?;
+        let (rating, rated_games) =
             rating_at_cutoff(&mut transaction, &wallet, round.round_sequence, cutoff_at).await?;
         sqlx::query(
             "UPDATE ranked_queue
-             SET rating_snapshot = $1, rating_snapshot_at = $2, status = 'SNAPSHOTTED'
-             WHERE market_round_id = $3 AND wallet = $4",
+             SET rating_snapshot = $1, rated_games_snapshot = $2,
+                 rating_snapshot_at = $3, status = 'SNAPSHOTTED'
+             WHERE market_round_id = $4 AND wallet = $5",
         )
         .bind(rating)
+        .bind(rated_games)
         .bind(cutoff_at)
         .bind(market_round_id)
         .bind(&wallet)
@@ -694,6 +705,22 @@ async fn lock_matchmaker_round(
     Ok(())
 }
 
+/// Serializes Ranked admission, cancellation, and matching with League's
+/// wallet-scoped reservation checks. The advisory key is intentionally shared
+/// with `league::lock_wallet` so the two competition modes cannot both admit
+/// the same wallet into overlapping rated obligations.
+async fn lock_ranked_wallet(
+    transaction: &mut Transaction<'_, Postgres>,
+    wallet: &str,
+) -> Result<(), RankedError> {
+    sqlx::query("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))")
+        .bind(wallet)
+        .execute(&mut **transaction)
+        .await
+        .map_err(storage_error)?;
+    Ok(())
+}
+
 async fn load_round(
     transaction: &mut Transaction<'_, Postgres>,
     market_round_id: i64,
@@ -750,7 +777,8 @@ async fn load_queue_entry(
 ) -> Result<QueueEntry, RankedError> {
     let row = sqlx::query(
         "SELECT q.market_round_id, q.wallet, q.status, q.rating_snapshot,
-                q.rating_snapshot_at, q.joined_at, r.queue_close_at,
+                q.rated_games_snapshot, q.rating_snapshot_at, q.joined_at,
+                r.queue_close_at,
                 r.start_target_at,
                 COALESCE((SELECT rating FROM ratings rt
                           JOIN seasons s ON s.id = rt.season_id
@@ -780,6 +808,7 @@ async fn load_queue_entry(
         tier: crate::rating::rating_tier(current_rating, current_rated_games).to_owned(),
         matchmaking_rating_status: "SNAPSHOTS_AT_QUEUE_CLOSE",
         rating_snapshot: row.try_get("rating_snapshot").map_err(storage_error)?,
+        rated_games_snapshot: row.try_get("rated_games_snapshot").map_err(storage_error)?,
         rating_snapshot_at: row.try_get("rating_snapshot_at").map_err(storage_error)?,
         joined_at: row.try_get("joined_at").map_err(storage_error)?,
         queue_closes_at: row.try_get("queue_close_at").map_err(storage_error)?,
@@ -823,6 +852,7 @@ async fn rating_at_cutoff(
                     JOIN seasons s ON s.id = re.season_id
                     WHERE s.status = 'ACTIVE'
                       AND re.wallet = $1
+                      AND re.event_kind = 'PLAYED_RATED_BATTLE'
                       AND re.round_sequence < $2
                       AND re.created_at <= $3
                 ), 0) AS rated_games",

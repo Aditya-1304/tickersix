@@ -191,6 +191,32 @@ fn ranked_pairing_is_deterministic_and_leaves_odd_player_unmatched() {
 }
 
 #[test]
+fn ranked_pairing_treats_recent_rematch_as_symmetric() {
+    let players = vec![
+        RankedPlayer {
+            wallet: [1; 32],
+            rating: 1500,
+            recent_opponents: vec![],
+        },
+        RankedPlayer {
+            wallet: [2; 32],
+            rating: 1501,
+            recent_opponents: vec![[1; 32]],
+        },
+        RankedPlayer {
+            wallet: [3; 32],
+            rating: 1502,
+            recent_opponents: vec![],
+        },
+    ];
+
+    let result = pair_ranked(&players);
+
+    assert_eq!(result.pairs, vec![(0, 2)]);
+    assert_eq!(result.unmatched, Some(1));
+}
+
+#[test]
 fn league_pairing_seed_binds_domain_league_round_and_chain_entropy() {
     let seed = league_pairing_seed([1; 32], 7, [2; 32]);
 
