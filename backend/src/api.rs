@@ -4,7 +4,7 @@
 //! in dedicated modules, while this layer translates HTTP input/output and
 //! keeps storage errors away from clients.
 
-use std::{env, error::Error, fmt, sync::Arc, time::Duration};
+use std::{env, error::Error, fmt, path::PathBuf, sync::Arc, time::Duration};
 
 use axum::{
     extract::{Path, Query, State},
@@ -28,6 +28,7 @@ use crate::{
     live::{self, LiveError},
     metrics,
     profile::{self, ProfileError, ProfileUpdate},
+    proof::{self, ProofError},
     ranked::{self, RankedError},
 };
 
@@ -36,6 +37,8 @@ pub struct ApiState {
     pub pool: PgPool,
     pub auth_domain: Arc<str>,
     pub secure_cookie: bool,
+    /// Optional local proof snapshot used by the read-only proof API.
+    pub proof_snapshot_path: Option<Arc<PathBuf>>,
 }
 
 impl ApiState {
@@ -44,7 +47,15 @@ impl ApiState {
             pool,
             auth_domain: auth_domain.into(),
             secure_cookie,
+            proof_snapshot_path: None,
         }
+    }
+}
+
+impl ApiState {
+    pub fn with_proof_snapshot_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.proof_snapshot_path = Some(Arc::new(path.into()));
+        self
     }
 }
 
@@ -58,6 +69,11 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/profiles/:wallet/history", get(get_profile_history))
         .route("/v1/profile/me", put(update_my_profile))
         .route("/v1/market-rounds/next", get(get_next_market_round))
+        .route(
+            "/v1/market-rounds/:pubkey/proof",
+            get(get_market_round_proof),
+        )
+        .route("/v1/battles/:pubkey/proof", get(get_battle_proof))
         .route("/v1/leagues", get(list_leagues))
         .route("/v1/leagues/:id", get(get_league))
         .route("/v1/leagues/:id/join", post(join_league))
@@ -89,6 +105,7 @@ pub async fn serve_from_env() -> Result<(), Box<dyn Error>> {
     let secure_cookie = env::var("TICKERSIX_SECURE_COOKIE")
         .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
+    let proof_snapshot_path = env::var_os("TICKERSIX_PROOF_SNAPSHOT").map(PathBuf::from);
     let pool = PgPoolOptions::new()
         .max_connections(8)
         .connect(&database_url)
@@ -98,7 +115,12 @@ pub async fn serve_from_env() -> Result<(), Box<dyn Error>> {
     println!("TickerSix API listening on {bind}");
     axum::serve(
         listener,
-        router(ApiState::new(pool, auth_domain, secure_cookie)),
+        router(match proof_snapshot_path {
+            Some(path) => {
+                ApiState::new(pool, auth_domain, secure_cookie).with_proof_snapshot_path(path)
+            }
+            None => ApiState::new(pool, auth_domain, secure_cookie),
+        }),
     )
     .await?;
     Ok(())
@@ -116,6 +138,7 @@ pub enum ApiError {
     League(LeagueError),
     Live(LiveError),
     Profile(ProfileError),
+    Proof(ProofError),
     Ranked(RankedError),
     DomainMismatch,
 }
@@ -128,6 +151,7 @@ impl fmt::Display for ApiError {
             Self::League(error) => write!(formatter, "{error}"),
             Self::Live(error) => write!(formatter, "{error}"),
             Self::Profile(error) => write!(formatter, "{error}"),
+            Self::Proof(error) => write!(formatter, "{error}"),
             Self::Ranked(error) => write!(formatter, "{error}"),
             Self::DomainMismatch => {
                 formatter.write_str("authentication domain does not match server configuration")
@@ -207,6 +231,10 @@ impl IntoResponse for ApiError {
                 | RankedError::RoundNotEligible
                 | RankedError::CoordinatorPlanUnavailable,
             ) => StatusCode::BAD_REQUEST,
+            Self::Proof(ProofError::NotConfigured | ProofError::PathMismatch) => {
+                StatusCode::NOT_FOUND
+            }
+            Self::Proof(_) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Auth(AuthError::Storage(_)) | Self::Profile(ProfileError::Storage(_)) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
@@ -254,6 +282,12 @@ impl From<LeagueError> for ApiError {
 impl From<LiveError> for ApiError {
     fn from(error: LiveError) -> Self {
         Self::Live(error)
+    }
+}
+
+impl From<ProofError> for ApiError {
+    fn from(error: ProofError) -> Self {
+        Self::Proof(error)
     }
 }
 
@@ -413,6 +447,37 @@ async fn get_next_market_round(
     Ok(Json(
         ranked::next_market_round(&state.pool, auth::unix_now()).await?,
     ))
+}
+
+fn load_requested_proof(
+    state: &ApiState,
+    request_path: &str,
+) -> Result<proof::PublicProof, ApiError> {
+    let snapshot_path = state
+        .proof_snapshot_path
+        .as_deref()
+        .ok_or(ProofError::NotConfigured)?;
+    let public_proof = proof::load_public_from_file(snapshot_path)?;
+    if !proof::proof_path_matches(request_path, &public_proof) {
+        return Err(ProofError::PathMismatch.into());
+    }
+    Ok(public_proof)
+}
+
+async fn get_market_round_proof(
+    State(state): State<ApiState>,
+    Path(pubkey): Path<String>,
+) -> Result<Json<proof::PublicProof>, ApiError> {
+    let request_path = format!("/v1/market-rounds/{pubkey}/proof");
+    Ok(Json(load_requested_proof(&state, &request_path)?))
+}
+
+async fn get_battle_proof(
+    State(state): State<ApiState>,
+    Path(pubkey): Path<String>,
+) -> Result<Json<proof::PublicProof>, ApiError> {
+    let request_path = format!("/v1/battles/{pubkey}/proof");
+    Ok(Json(load_requested_proof(&state, &request_path)?))
 }
 
 async fn list_leagues(
@@ -621,6 +686,8 @@ fn error_code(error: &ApiError) -> &'static str {
         ApiError::Live(LiveError::InvalidBattle) => "INVALID_BATTLE",
         ApiError::Live(LiveError::NotFound) => "BATTLE_NOT_FOUND",
         ApiError::Live(LiveError::Storage(_)) => "INTERNAL_ERROR",
+        ApiError::Proof(ProofError::NotConfigured | ProofError::PathMismatch) => "PROOF_NOT_FOUND",
+        ApiError::Proof(_) => "PROOF_UNAVAILABLE",
         ApiError::Ranked(RankedError::Storage(_)) => "INTERNAL_ERROR",
         ApiError::Ranked(RankedError::RoundNotFound) => "ROUND_NOT_FOUND",
         ApiError::Ranked(RankedError::QueueNotFound) => "QUEUE_NOT_FOUND",

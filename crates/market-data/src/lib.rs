@@ -22,10 +22,12 @@ use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use serde_json::value::RawValue;
 
 pub mod baseline;
+pub mod basis;
 pub mod sponsors;
 pub mod xstocks;
 
 pub use baseline::*;
+pub use basis::*;
 pub use sponsors::*;
 pub use xstocks::*;
 

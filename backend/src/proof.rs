@@ -241,6 +241,8 @@ pub enum ProofError {
     InvalidPythEvidence,
     ChainStateMismatch,
     MissingSettlementTransaction,
+    NotConfigured,
+    PathMismatch,
     Io(String),
     Json(String),
 }
@@ -270,6 +272,8 @@ impl fmt::Display for ProofError {
             Self::MissingSettlementTransaction => {
                 "proof is missing the finalized settlement transaction"
             }
+            Self::NotConfigured => "proof snapshot is not configured",
+            Self::PathMismatch => "proof path does not match the requested resource",
             Self::Io(error) | Self::Json(error) => error,
         };
         formatter.write_str(message)
@@ -711,15 +715,20 @@ fn format_return_q9(value: i64) -> String {
     )
 }
 
-/// Loads a reconciled proof snapshot from disk and serves read-only proof
-/// routes. The `/v1/.../{pubkey}/proof` routes are the public API contract;
-/// numeric legacy routes remain available for local fixture compatibility.
-pub fn serve_from_file(path: impl AsRef<Path>, bind_address: &str) -> Result<(), ProofError> {
+/// Loads and validates a reconciled proof snapshot from disk for the HTTP API.
+pub fn load_public_from_file(path: impl AsRef<Path>) -> Result<PublicProof, ProofError> {
     let snapshot: ProofSnapshot = serde_json::from_str(
         &fs::read_to_string(path).map_err(|error| ProofError::Io(error.to_string()))?,
     )
     .map_err(|error| ProofError::Json(error.to_string()))?;
-    let proof = snapshot.into_public()?;
+    snapshot.into_public()
+}
+
+/// Loads a reconciled proof snapshot from disk and serves read-only proof
+/// routes. The `/v1/.../{pubkey}/proof` routes are the public API contract;
+/// numeric legacy routes remain available for local fixture compatibility.
+pub fn serve_from_file(path: impl AsRef<Path>, bind_address: &str) -> Result<(), ProofError> {
+    let proof = load_public_from_file(path)?;
     let body = serde_json::to_vec(&proof).map_err(|error| ProofError::Json(error.to_string()))?;
     let listener =
         TcpListener::bind(bind_address).map_err(|error| ProofError::Io(error.to_string()))?;
@@ -773,7 +782,7 @@ fn respond(stream: &mut TcpStream, proof: &PublicProof, body: &[u8]) -> Result<(
         .map_err(|error| ProofError::Io(error.to_string()))
 }
 
-fn proof_path_matches(path: &str, proof: &PublicProof) -> bool {
+pub fn proof_path_matches(path: &str, proof: &PublicProof) -> bool {
     if path
         == format!(
             "/v1/market-rounds/{}/proof",

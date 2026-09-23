@@ -47,6 +47,8 @@ pub struct IndexedMarketRound {
     pub round_sequence: i64,
     pub state: String,
     pub is_replay: bool,
+    pub competition_domain: String,
+    pub settlement_source_kind: String,
     pub queue_close_at: i64,
     pub start_target_at: i64,
     pub end_target_at: i64,
@@ -195,6 +197,15 @@ pub fn validate_market_round(round: &IndexedMarketRound) -> Result<(), IndexerEr
     {
         return Err(IndexerError::InvalidRound);
     }
+    if !matches!(
+        round.competition_domain.as_str(),
+        "PUBLIC_EQUITY" | "PRIVATE_MARKET"
+    ) || !matches!(
+        round.settlement_source_kind.as_str(),
+        "JUPITER_TOKEN_SPOT_V1" | "PYTH_PRO_VERIFIED_V1" | "PYTH_247_INDEX_V1"
+    ) {
+        return Err(IndexerError::InvalidRound);
+    }
     Ok(())
 }
 
@@ -206,12 +217,15 @@ pub async fn upsert_market_round(
     let row = sqlx::query(
         "INSERT INTO market_rounds
             (chain_pubkey, round_sequence, state, is_replay,
+             competition_domain, settlement_source_kind,
              queue_close_at, start_target_at, end_target_at, indexed_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
          ON CONFLICT (chain_pubkey) DO UPDATE SET
              round_sequence = EXCLUDED.round_sequence,
              state = EXCLUDED.state,
              is_replay = EXCLUDED.is_replay,
+             competition_domain = EXCLUDED.competition_domain,
+             settlement_source_kind = EXCLUDED.settlement_source_kind,
              queue_close_at = EXCLUDED.queue_close_at,
              start_target_at = EXCLUDED.start_target_at,
              end_target_at = EXCLUDED.end_target_at,
@@ -222,6 +236,8 @@ pub async fn upsert_market_round(
     .bind(round.round_sequence)
     .bind(&round.state)
     .bind(round.is_replay)
+    .bind(&round.competition_domain)
+    .bind(&round.settlement_source_kind)
     .bind(round.queue_close_at)
     .bind(round.start_target_at)
     .bind(round.end_target_at)
@@ -390,6 +406,8 @@ mod tests {
             round_sequence: 1,
             state: "SCHEDULED".to_owned(),
             is_replay: false,
+            competition_domain: "PUBLIC_EQUITY".to_owned(),
+            settlement_source_kind: "JUPITER_TOKEN_SPOT_V1".to_owned(),
             queue_close_at: 100,
             start_target_at: 200,
             end_target_at: 300,
@@ -407,6 +425,23 @@ mod tests {
             Err(IndexerError::InvalidRound)
         );
         assert!(validate_market_round(&round()).is_ok());
+    }
+
+    #[test]
+    fn indexer_rejects_unknown_market_round_consumer_metadata_before_database_access() {
+        let mut invalid = round();
+        invalid.competition_domain = "UNREGISTERED_DOMAIN".to_owned();
+        assert_eq!(
+            validate_market_round(&invalid),
+            Err(IndexerError::InvalidRound)
+        );
+
+        let mut invalid = round();
+        invalid.settlement_source_kind = "UNREGISTERED_SOURCE".to_owned();
+        assert_eq!(
+            validate_market_round(&invalid),
+            Err(IndexerError::InvalidRound)
+        );
     }
 
     #[test]

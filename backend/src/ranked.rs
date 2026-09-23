@@ -19,6 +19,25 @@ use crate::{auth::parse_wallet, metrics};
 pub const PAIRING_POLICY_VERSION: i32 = 1;
 pub use crate::rating::RATING_FORMULA_VERSION;
 pub const RECENT_REMATCH_WINDOW: i64 = 5;
+pub const PUBLIC_EQUITY_DOMAIN: &str = "PUBLIC_EQUITY";
+pub const PRIVATE_MARKET_DOMAIN: &str = "PRIVATE_MARKET";
+pub const SOLANA_DEVNET_NETWORK: &str = "SOLANA_DEVNET";
+
+pub const JUPITER_SOURCE_KIND: &str = "JUPITER_TOKEN_SPOT_V1";
+pub const PYTH_SOURCE_KIND: &str = "PYTH_PRO_VERIFIED_V1";
+pub const PYTH_LEGACY_SOURCE_KIND: &str = "PYTH_247_INDEX_V1";
+
+pub const JUPITER_QUEUE_TRUST_LABEL: &str = "JUPITER ATTESTED";
+pub const PYTH_QUEUE_TRUST_LABEL: &str = "PYTH VERIFIED";
+
+/// Returns the exact consumer label for a frozen settlement source.
+pub fn source_trust_label(source_kind: &str) -> Option<&'static str> {
+    match source_kind {
+        JUPITER_SOURCE_KIND => Some(JUPITER_QUEUE_TRUST_LABEL),
+        PYTH_SOURCE_KIND | PYTH_LEGACY_SOURCE_KIND => Some(PYTH_QUEUE_TRUST_LABEL),
+        _ => None,
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RankedError {
@@ -68,6 +87,10 @@ pub struct NextMarketRound {
     pub round_sequence: i64,
     pub state: String,
     pub is_replay: bool,
+    pub competition_domain: String,
+    pub settlement_source_kind: String,
+    pub source_trust_label: &'static str,
+    pub network: &'static str,
     pub queue_close_at: i64,
     pub start_target_at: i64,
     pub end_target_at: i64,
@@ -78,6 +101,10 @@ pub struct QueueEntry {
     pub market_round_id: i64,
     pub wallet: String,
     pub status: String,
+    pub competition_domain: String,
+    pub settlement_source_kind: String,
+    pub source_trust_label: &'static str,
+    pub network: &'static str,
     pub current_rating: i32,
     pub tier: String,
     pub matchmaking_rating_status: &'static str,
@@ -132,10 +159,12 @@ pub async fn next_market_round(
 ) -> Result<Option<NextMarketRound>, RankedError> {
     let row = sqlx::query(
         "SELECT id, chain_pubkey, round_sequence, state, is_replay,
+                competition_domain, settlement_source_kind,
                 queue_close_at, start_target_at, end_target_at
          FROM market_rounds
          WHERE state IN ('SCHEDULED', 'COMMIT_OPEN')
            AND is_replay = FALSE
+           AND competition_domain = 'PUBLIC_EQUITY'
            AND queue_close_at > $1
          ORDER BY start_target_at ASC, round_sequence ASC
          LIMIT 1",
@@ -728,6 +757,7 @@ async fn load_round(
 ) -> Result<NextMarketRound, RankedError> {
     sqlx::query(
         "SELECT id, chain_pubkey, round_sequence, state, is_replay,
+                competition_domain, settlement_source_kind,
                 queue_close_at, start_target_at, end_target_at
          FROM market_rounds WHERE id = $1 FOR UPDATE",
     )
@@ -740,12 +770,22 @@ async fn load_round(
 }
 
 fn market_round_from_row(row: &PgRow) -> Result<NextMarketRound, RankedError> {
+    let competition_domain: String = row.try_get("competition_domain").map_err(storage_error)?;
+    let settlement_source_kind: String = row
+        .try_get("settlement_source_kind")
+        .map_err(storage_error)?;
+    let source_trust_label =
+        source_trust_label(&settlement_source_kind).ok_or(RankedError::InvalidRound)?;
     let round = NextMarketRound {
         id: row.try_get("id").map_err(storage_error)?,
         chain_pubkey: row.try_get("chain_pubkey").map_err(storage_error)?,
         round_sequence: row.try_get("round_sequence").map_err(storage_error)?,
         state: row.try_get("state").map_err(storage_error)?,
         is_replay: row.try_get("is_replay").map_err(storage_error)?,
+        competition_domain,
+        settlement_source_kind,
+        source_trust_label,
+        network: SOLANA_DEVNET_NETWORK,
         queue_close_at: row.try_get("queue_close_at").map_err(storage_error)?,
         start_target_at: row.try_get("start_target_at").map_err(storage_error)?,
         end_target_at: row.try_get("end_target_at").map_err(storage_error)?,
@@ -758,6 +798,7 @@ fn market_round_from_row(row: &PgRow) -> Result<NextMarketRound, RankedError> {
 }
 
 fn validate_matchmaker_window(round: &NextMarketRound, now: i64) -> Result<(), RankedError> {
+    validate_public_ranked_metadata(round)?;
     if round.queue_close_at >= round.start_target_at || round.start_target_at >= round.end_target_at
     {
         return Err(RankedError::InvalidRound);
@@ -775,6 +816,7 @@ fn validate_matchmaker_window(round: &NextMarketRound, now: i64) -> Result<(), R
 }
 
 fn validate_queue_round(round: &NextMarketRound, now: i64) -> Result<(), RankedError> {
+    validate_public_ranked_metadata(round)?;
     if round.queue_close_at >= round.start_target_at || round.start_target_at >= round.end_target_at
     {
         return Err(RankedError::InvalidRound);
@@ -784,6 +826,19 @@ fn validate_queue_round(round: &NextMarketRound, now: i64) -> Result<(), RankedE
     }
     if now >= round.queue_close_at {
         return Err(RankedError::QueueClosed);
+    }
+    Ok(())
+}
+
+fn validate_public_ranked_metadata(round: &NextMarketRound) -> Result<(), RankedError> {
+    if round.competition_domain != PUBLIC_EQUITY_DOMAIN {
+        return Err(RankedError::RoundNotEligible);
+    }
+    let Some(expected_label) = source_trust_label(&round.settlement_source_kind) else {
+        return Err(RankedError::InvalidRound);
+    };
+    if expected_label != round.source_trust_label {
+        return Err(RankedError::InvalidRound);
     }
     Ok(())
 }
@@ -798,6 +853,8 @@ async fn load_queue_entry(
                 q.rated_games_snapshot, q.rating_snapshot_at, q.joined_at,
                 r.queue_close_at,
                 r.start_target_at,
+                r.competition_domain,
+                r.settlement_source_kind,
                 COALESCE((SELECT rating FROM ratings rt
                           JOIN seasons s ON s.id = rt.season_id
                           WHERE s.status = 'ACTIVE' AND rt.wallet = q.wallet
@@ -817,11 +874,21 @@ async fn load_queue_entry(
     .map_err(storage_error)?
     .ok_or(RankedError::QueueNotFound)?;
     let current_rating: i32 = row.try_get("current_rating").map_err(storage_error)?;
+    let competition_domain: String = row.try_get("competition_domain").map_err(storage_error)?;
+    let settlement_source_kind: String = row
+        .try_get("settlement_source_kind")
+        .map_err(storage_error)?;
+    let source_trust_label =
+        source_trust_label(&settlement_source_kind).ok_or(RankedError::InvalidRound)?;
     let current_rated_games: i32 = row.try_get("current_rated_games").map_err(storage_error)?;
     Ok(QueueEntry {
         market_round_id: row.try_get("market_round_id").map_err(storage_error)?,
         wallet: row.try_get("wallet").map_err(storage_error)?,
         status: row.try_get("status").map_err(storage_error)?,
+        competition_domain,
+        settlement_source_kind,
+        source_trust_label,
+        network: SOLANA_DEVNET_NETWORK,
         current_rating,
         tier: crate::rating::rating_tier(current_rating, current_rated_games).to_owned(),
         matchmaking_rating_status: "SNAPSHOTS_AT_QUEUE_CLOSE",
@@ -1167,6 +1234,42 @@ mod tests {
     }
 
     #[test]
+    fn source_labels_remain_distinct_and_unknown_sources_fail_closed() {
+        assert_eq!(
+            source_trust_label(JUPITER_SOURCE_KIND),
+            Some(JUPITER_QUEUE_TRUST_LABEL)
+        );
+        assert_eq!(
+            source_trust_label(PYTH_SOURCE_KIND),
+            Some(PYTH_QUEUE_TRUST_LABEL)
+        );
+        assert_eq!(source_trust_label("UNREGISTERED_SOURCE"), None);
+    }
+
+    #[test]
+    fn private_market_rounds_are_rejected_by_public_ranked_admission() {
+        let round = NextMarketRound {
+            id: 3,
+            chain_pubkey: None,
+            round_sequence: 3,
+            state: "SCHEDULED".to_owned(),
+            is_replay: false,
+            competition_domain: PRIVATE_MARKET_DOMAIN.to_owned(),
+            settlement_source_kind: JUPITER_SOURCE_KIND.to_owned(),
+            source_trust_label: JUPITER_QUEUE_TRUST_LABEL,
+            network: SOLANA_DEVNET_NETWORK,
+            queue_close_at: 100,
+            start_target_at: 200,
+            end_target_at: 300,
+        };
+
+        assert_eq!(
+            validate_queue_round(&round, 50),
+            Err(RankedError::RoundNotEligible)
+        );
+    }
+
+    #[test]
     fn invalid_round_timing_is_rejected_before_queue_admission() {
         let round = NextMarketRound {
             id: 1,
@@ -1174,6 +1277,10 @@ mod tests {
             round_sequence: 1,
             state: "SCHEDULED".to_owned(),
             is_replay: false,
+            competition_domain: PUBLIC_EQUITY_DOMAIN.to_owned(),
+            settlement_source_kind: JUPITER_SOURCE_KIND.to_owned(),
+            source_trust_label: JUPITER_QUEUE_TRUST_LABEL,
+            network: SOLANA_DEVNET_NETWORK,
             queue_close_at: 100,
             start_target_at: 100,
             end_target_at: 200,
@@ -1193,6 +1300,10 @@ mod tests {
             round_sequence: 2,
             state: "COMMIT_OPEN".to_owned(),
             is_replay: false,
+            competition_domain: PUBLIC_EQUITY_DOMAIN.to_owned(),
+            settlement_source_kind: JUPITER_SOURCE_KIND.to_owned(),
+            source_trust_label: JUPITER_QUEUE_TRUST_LABEL,
+            network: SOLANA_DEVNET_NETWORK,
             queue_close_at: 100,
             start_target_at: 200,
             end_target_at: 300,
