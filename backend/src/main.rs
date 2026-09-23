@@ -35,6 +35,7 @@ pub mod leaderboard;
 pub mod league;
 pub mod live;
 pub mod metrics;
+pub mod private_markets;
 pub mod profile;
 pub mod proof;
 pub mod ranked;

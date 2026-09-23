@@ -408,6 +408,12 @@ pub struct PrivateRepresentationDescriptor {
     pub reference_symbol: String,
     pub representation_symbol: String,
     pub display_name: String,
+    /// Provider-reported lifecycle when available; otherwise the contract
+    /// deliberately exposes UNSPECIFIED instead of inferring ACTIVE.
+    pub lifecycle_status: String,
+    /// Provider-described economic structure retained for transparent UI.
+    pub provider_disclosure: String,
+    pub source_url: Option<String>,
     pub structure_kind: String,
     pub mint_or_contract: String,
     pub mark_price_q9: i64,
@@ -453,11 +459,17 @@ struct PreStocksDocument {
     name: String,
     symbol: String,
     description: String,
+    #[serde(default)]
+    external_url: Option<String>,
     contract_address: String,
     #[serde(rename = "markPrice")]
     mark_price: Option<Box<RawValue>>,
     #[serde(rename = "markValuation")]
     mark_valuation: Option<Box<RawValue>>,
+    #[serde(default)]
+    lifecycle: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -470,6 +482,10 @@ struct TesseraDocument {
     #[serde(rename = "markValuation")]
     mark_valuation: Option<Box<RawValue>>,
     holders: Option<u64>,
+    #[serde(default)]
+    lifecycle: Option<String>,
+    #[serde(default)]
+    status: Option<String>,
 }
 
 pub fn parse_prestocks_catalog(
@@ -498,6 +514,13 @@ pub fn parse_prestocks_catalog(
                 reference_symbol: document.symbol.clone(),
                 representation_symbol: document.symbol,
                 display_name: document.name,
+                lifecycle_status: normalize_lifecycle_status(
+                    document.lifecycle.or(document.status),
+                ),
+                provider_disclosure:
+                    "Provider-described SPV economic exposure; not ordinary shareholder rights"
+                        .to_owned(),
+                source_url: document.external_url,
                 structure_kind: "SpvEconomicExposure".to_owned(),
                 mint_or_contract: document.contract_address,
                 mark_price_q9: parse_required_q9(document.mark_price.as_deref())?,
@@ -529,6 +552,12 @@ pub fn parse_tessera_catalog(
                 reference_symbol: document.symbol.trim_start_matches("T-").to_owned(),
                 representation_symbol: document.symbol,
                 display_name: document.name,
+                lifecycle_status: normalize_lifecycle_status(
+                    document.lifecycle.or(document.status),
+                ),
+                provider_disclosure:
+                    "Provider-described loan participation right; not ordinary equity".to_owned(),
+                source_url: None,
                 structure_kind: "LoanParticipationRight".to_owned(),
                 mint_or_contract: document.mint,
                 mark_price_q9: parse_required_q9(document.mark_price.as_deref())?,
@@ -539,6 +568,13 @@ pub fn parse_tessera_catalog(
             })
         })
         .collect()
+}
+
+fn normalize_lifecycle_status(value: Option<String>) -> String {
+    value
+        .map(|value| value.trim().to_ascii_uppercase())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "UNSPECIFIED".to_owned())
 }
 
 fn parse_required_q9(value: Option<&RawValue>) -> Result<i64, PrivateRepresentationError> {
@@ -701,6 +737,32 @@ pub fn assess_private_market_catalogs(
         tessera,
         activation: decide_private_market_activation(true, true, quality_measured),
     })
+}
+
+/// Enables private exhibition readiness only after both provider catalogs are
+/// valid, quality has been measured, and at least six distinct usable reference
+/// assets are available. This gate never makes a representation Public Ranked
+/// eligible or creates a cross-domain rating event.
+pub fn private_market_exhibition_ready(
+    assessment: &PrivateMarketCatalogAssessment,
+    quality_measured: bool,
+) -> bool {
+    if !quality_measured || assessment.activation == PrivateMarketActivation::MetadataOnly {
+        return false;
+    }
+
+    let mut references = std::collections::BTreeSet::new();
+    assessment
+        .prestocks
+        .iter()
+        .chain(assessment.tessera.iter())
+        .filter(|descriptor| {
+            descriptor.mark_price_q9 > 0 && !descriptor.mint_or_contract.trim().is_empty()
+        })
+        .for_each(|descriptor| {
+            references.insert(descriptor.reference_symbol.trim().to_ascii_uppercase());
+        });
+    references.len() >= 6
 }
 
 #[derive(Debug)]

@@ -27,6 +27,7 @@ use crate::{
     league::{self, LeagueError},
     live::{self, LiveError},
     metrics,
+    private_markets::{self, PrivateMarketsError},
     profile::{self, ProfileError, ProfileUpdate},
     proof::{self, ProofError},
     ranked::{self, RankedError},
@@ -40,6 +41,7 @@ pub struct ApiState {
     pub secure_cookie: bool,
     /// Optional local proof snapshot used by the read-only proof API.
     pub proof_snapshot_path: Option<Arc<PathBuf>>,
+    pub private_markets: Arc<private_markets::PrivateMarketsService>,
 }
 
 impl ApiState {
@@ -49,6 +51,7 @@ impl ApiState {
             auth_domain: auth_domain.into(),
             secure_cookie,
             proof_snapshot_path: None,
+            private_markets: Arc::new(private_markets::PrivateMarketsService::from_env()),
         }
     }
 }
@@ -76,6 +79,22 @@ pub fn router(state: ApiState) -> Router {
         )
         .route("/v1/battles/:pubkey/proof", get(get_battle_proof))
         .route("/v1/battles/:pubkey/replay", get(get_battle_replay))
+        .route(
+            "/v1/private-markets/assets",
+            get(list_private_market_assets),
+        )
+        .route(
+            "/v1/private-markets/assets/:id",
+            get(get_private_market_asset),
+        )
+        .route(
+            "/v1/private-markets/assets/:id/representations",
+            get(get_private_market_representations),
+        )
+        .route(
+            "/v1/private-markets/comparisons/:asset_id",
+            get(get_private_market_comparison),
+        )
         .route("/v1/leagues", get(list_leagues))
         .route("/v1/leagues/:id", get(get_league))
         .route("/v1/leagues/:id/join", post(join_league))
@@ -139,6 +158,7 @@ pub enum ApiError {
     Leaderboard(LeaderboardError),
     League(LeagueError),
     Live(LiveError),
+    PrivateMarkets(PrivateMarketsError),
     Profile(ProfileError),
     Proof(ProofError),
     Ranked(RankedError),
@@ -153,6 +173,7 @@ impl fmt::Display for ApiError {
             Self::Leaderboard(error) => write!(formatter, "{error}"),
             Self::League(error) => write!(formatter, "{error}"),
             Self::Live(error) => write!(formatter, "{error}"),
+            Self::PrivateMarkets(error) => write!(formatter, "{error}"),
             Self::Profile(error) => write!(formatter, "{error}"),
             Self::Proof(error) => write!(formatter, "{error}"),
             Self::Ranked(error) => write!(formatter, "{error}"),
@@ -242,6 +263,11 @@ impl IntoResponse for ApiError {
             Self::Replay(ReplayError::NotFound | ReplayError::Unavailable) => StatusCode::NOT_FOUND,
             Self::Replay(ReplayError::InvalidBattle) => StatusCode::BAD_REQUEST,
             Self::Replay(ReplayError::Storage(_)) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::PrivateMarkets(PrivateMarketsError::NotFound) => StatusCode::NOT_FOUND,
+            Self::PrivateMarkets(PrivateMarketsError::InvalidAssetId) => StatusCode::BAD_REQUEST,
+            Self::PrivateMarkets(PrivateMarketsError::Unavailable(_)) => {
+                StatusCode::SERVICE_UNAVAILABLE
+            }
             Self::Auth(AuthError::Storage(_)) | Self::Profile(ProfileError::Storage(_)) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
@@ -307,6 +333,12 @@ impl From<RankedError> for ApiError {
 impl From<ReplayError> for ApiError {
     fn from(error: ReplayError) -> Self {
         Self::Replay(error)
+    }
+}
+
+impl From<PrivateMarketsError> for ApiError {
+    fn from(error: PrivateMarketsError) -> Self {
+        Self::PrivateMarkets(error)
     }
 }
 
@@ -498,6 +530,35 @@ async fn get_battle_replay(
     Path(pubkey): Path<String>,
 ) -> Result<Json<replay::ReplayTimeline>, ApiError> {
     Ok(Json(replay::get_replay(&state.pool, &pubkey).await?))
+}
+
+async fn list_private_market_assets(
+    State(state): State<ApiState>,
+) -> Result<Json<private_markets::PrivateMarketCatalogResponse>, ApiError> {
+    Ok(Json(state.private_markets.catalog().await?))
+}
+
+async fn get_private_market_asset(
+    State(state): State<ApiState>,
+    Path(asset_id): Path<String>,
+) -> Result<Json<private_markets::PrivateMarketAssetDetail>, ApiError> {
+    Ok(Json(state.private_markets.asset(&asset_id).await?))
+}
+
+async fn get_private_market_representations(
+    State(state): State<ApiState>,
+    Path(asset_id): Path<String>,
+) -> Result<Json<private_markets::PrivateMarketRepresentationsResponse>, ApiError> {
+    Ok(Json(
+        state.private_markets.representations(&asset_id).await?,
+    ))
+}
+
+async fn get_private_market_comparison(
+    State(state): State<ApiState>,
+    Path(asset_id): Path<String>,
+) -> Result<Json<private_markets::PrivateMarketComparison>, ApiError> {
+    Ok(Json(state.private_markets.comparison(&asset_id).await?))
 }
 
 async fn list_leagues(
@@ -708,6 +769,13 @@ fn error_code(error: &ApiError) -> &'static str {
         ApiError::Live(LiveError::Storage(_)) => "INTERNAL_ERROR",
         ApiError::Proof(ProofError::NotConfigured | ProofError::PathMismatch) => "PROOF_NOT_FOUND",
         ApiError::Proof(_) => "PROOF_UNAVAILABLE",
+        ApiError::PrivateMarkets(PrivateMarketsError::InvalidAssetId) => {
+            "INVALID_PRIVATE_MARKET_ASSET"
+        }
+        ApiError::PrivateMarkets(PrivateMarketsError::NotFound) => "PRIVATE_MARKET_ASSET_NOT_FOUND",
+        ApiError::PrivateMarkets(PrivateMarketsError::Unavailable(_)) => {
+            "PRIVATE_MARKETS_UNAVAILABLE"
+        }
         ApiError::Replay(ReplayError::InvalidBattle) => "INVALID_BATTLE",
         ApiError::Replay(ReplayError::NotFound) => "BATTLE_NOT_FOUND",
         ApiError::Replay(ReplayError::Unavailable) => "REPLAY_UNAVAILABLE",
