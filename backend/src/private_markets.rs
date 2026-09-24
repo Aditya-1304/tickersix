@@ -328,7 +328,7 @@ fn representations_for_asset(
     asset_id: &str,
 ) -> Vec<PrivateMarketRepresentation> {
     let reference_symbol = asset_id
-        .strip_prefix("private-market/")
+        .strip_prefix("private-market-")
         .unwrap_or_default()
         .to_ascii_uppercase();
     assessment
@@ -376,7 +376,7 @@ fn to_representation(
 }
 
 fn private_asset_id(reference_symbol: &str) -> String {
-    format!("private-market/{}", reference_symbol.to_ascii_lowercase())
+    format!("private-market-{}", reference_symbol.to_ascii_lowercase())
 }
 
 fn unix_now() -> i64 {

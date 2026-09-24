@@ -662,6 +662,122 @@ h3 {
   text-align: center;
 }
 
+.private-asset-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin-top: 18px;
+}
+
+.private-asset-card {
+  min-height: 150px;
+  border: 1px solid var(--line);
+  border-radius: 15px;
+  padding: 14px;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+  background: rgba(16, 27, 45, 0.78);
+  transition: border-color 160ms ease, transform 160ms ease;
+}
+
+.private-asset-card:hover {
+  border-color: rgba(246, 199, 107, 0.62);
+  transform: translateY(-2px);
+}
+
+.private-asset-card .status-pill {
+  padding: 5px 8px;
+  color: var(--amber);
+  font-size: 0.62rem;
+}
+
+.private-asset-card .status-pill::before {
+  background: var(--amber);
+}
+
+.private-asset-card .muted {
+  display: block;
+  margin-top: 13px;
+  font-size: 0.68rem;
+}
+
+.private-detail {
+  margin-top: 18px;
+}
+
+.representation-card {
+  border: 1px solid var(--line);
+  border-radius: 15px;
+  padding: 16px;
+  background: rgba(9, 17, 31, 0.36);
+}
+
+.representation-card .mode-label {
+  margin-bottom: 5px;
+  color: var(--amber);
+}
+
+.private-detail-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+  margin: 14px 0;
+}
+
+.private-detail-grid > div {
+  display: grid;
+  gap: 4px;
+}
+
+.private-label {
+  display: block;
+  color: var(--muted);
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.provider-link {
+  color: var(--cyan);
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.06em;
+  text-decoration: none;
+}
+
+.comparison-panel,
+.exhibition-panel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  margin-top: 16px;
+  border: 1px solid rgba(246, 199, 107, 0.28);
+  border-radius: 15px;
+  padding: 15px;
+  background: rgba(246, 199, 107, 0.06);
+}
+
+.exhibition-panel > div {
+  display: grid;
+  gap: 5px;
+}
+
+.comparison-panel .card-copy {
+  margin: 10px 0 0;
+  font-size: 0.82rem;
+}
+
+.empty-state {
+  border: 1px dashed var(--line);
+  border-radius: 15px;
+  padding: 24px;
+  color: var(--muted);
+  text-align: center;
+}
+
 @media (max-width: 760px) {
   .shell {
     width: min(100% - 22px, 620px);
@@ -681,8 +797,16 @@ h3 {
 
   .grid.two,
   .grid.three,
-  .proof-grid {
+  .proof-grid,
+  .private-asset-grid,
+  .private-detail-grid {
     grid-template-columns: 1fr;
+  }
+
+  .exhibition-panel,
+  .comparison-panel {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .asset-grid {

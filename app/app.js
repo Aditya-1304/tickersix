@@ -160,6 +160,107 @@ const DEMO_PROOF = {
   transaction_signatures: ["commit-a-demo", "reveal-a-demo", "settlement-demo"],
 };
 
+const DEMO_PRIVATE_MARKETS = {
+  competition_domain: "PRIVATE_MARKET",
+  activation: "MetadataOnly",
+  captured_at_unix: 0,
+  exhibition: {
+    eligible: false,
+    status: "UNAVAILABLE",
+    reason: "QUALITY_NOT_MEASURED",
+    usable_reference_asset_count: 4,
+    minimum_reference_asset_count: 6,
+    competition_domain: "PRIVATE_MARKET",
+    rated: false,
+  },
+  assets: [
+    {
+      id: "private-market-openai",
+      reference_symbol: "OPENAI",
+      display_name: "OPENAI",
+      providers: ["PreStocks", "Tessera"],
+      representation_count: 2,
+      competition_domain: "PRIVATE_MARKET",
+      exhibition_eligible: false,
+    },
+    {
+      id: "private-market-anduril",
+      reference_symbol: "ANDURIL",
+      display_name: "ANDURIL",
+      providers: ["PreStocks"],
+      representation_count: 1,
+      competition_domain: "PRIVATE_MARKET",
+      exhibition_eligible: false,
+    },
+    {
+      id: "private-market-kalshi",
+      reference_symbol: "KALSHI",
+      display_name: "KALSHI",
+      providers: ["Tessera"],
+      representation_count: 1,
+      competition_domain: "PRIVATE_MARKET",
+      exhibition_eligible: false,
+    },
+    {
+      id: "private-market-spacex",
+      reference_symbol: "SPACEX",
+      display_name: "SPACEX",
+      providers: ["Tessera"],
+      representation_count: 1,
+      competition_domain: "PRIVATE_MARKET",
+      exhibition_eligible: false,
+    },
+  ],
+};
+
+const DEMO_PRIVATE_DETAILS = {
+  "private-market-openai": {
+    asset: DEMO_PRIVATE_MARKETS.assets[0],
+    captured_at_unix: 0,
+    exhibition: DEMO_PRIVATE_MARKETS.exhibition,
+    representations: [
+      {
+        id: "private-market/prestocks/openai",
+        provider: "PreStocks",
+        reference_asset_id: "private-market-openai",
+        reference_symbol: "OPENAI",
+        representation_symbol: "OPENAI",
+        display_name: "OpenAI PreStocks",
+        structure_kind: "SpvEconomicExposure",
+        provider_disclosure: "Provider-described SPV economic exposure; not ordinary shareholder rights",
+        lifecycle_status: "UNSPECIFIED",
+        source_url: "https://prestocks.com/openai",
+        mint_or_contract: "PreStocks contract",
+        mark_price_q9: 1001454006544,
+        mark_valuation_q9: "1240731710609000000000",
+        holder_count: null,
+        comparability: "Unsupported",
+        rated_settlement_eligible: false,
+        competition_domain: "PRIVATE_MARKET",
+      },
+      {
+        id: "private-market/tessera/t-openai",
+        provider: "Tessera",
+        reference_asset_id: "private-market-openai",
+        reference_symbol: "OPENAI",
+        representation_symbol: "T-OpenAI",
+        display_name: "T-OpenAI",
+        structure_kind: "LoanParticipationRight",
+        provider_disclosure: "Provider-described loan participation right; not ordinary equity",
+        lifecycle_status: "UNSPECIFIED",
+        source_url: null,
+        mint_or_contract: "Tessera mint",
+        mark_price_q9: 812790000000,
+        mark_valuation_q9: "950000000000000000000",
+        holder_count: 8259,
+        comparability: "Unsupported",
+        rated_settlement_eligible: false,
+        competition_domain: "PRIVATE_MARKET",
+      },
+    ],
+  },
+};
+
 const state = {
   view: "home",
   round: DEMO_ROUND,
@@ -176,6 +277,11 @@ const state = {
   backendOnline: false,
   toast: null,
   basisOpen: false,
+  privateMarkets: DEMO_PRIVATE_MARKETS,
+  privateMarketsError: null,
+  privateMarketsLoading: false,
+  privateAssetDetail: null,
+  privateComparison: null,
 };
 
 const app = document.querySelector("#app");
@@ -253,6 +359,61 @@ async function loadProof() {
   } catch {
     state.proof = DEMO_PROOF;
   }
+}
+
+async function loadPrivateMarkets() {
+  state.privateMarketsLoading = true;
+  state.privateMarketsError = null;
+  state.privateAssetDetail = null;
+  state.privateComparison = null;
+  render();
+  try {
+    state.privateMarkets = await api("/v1/private-markets/assets");
+    state.backendOnline = true;
+  } catch (error) {
+    state.privateMarkets = DEMO_PRIVATE_MARKETS;
+    state.privateMarketsError = error.message || "PRIVATE_MARKETS_UNAVAILABLE";
+  } finally {
+    state.privateMarketsLoading = false;
+    render();
+  }
+}
+
+async function loadPrivateAsset(assetId) {
+  state.privateMarketsError = null;
+  try {
+    state.privateAssetDetail = await api(
+      `/v1/private-markets/assets/${encodeURIComponent(assetId)}`,
+    );
+    state.privateComparison = await api(
+      `/v1/private-markets/comparisons/${encodeURIComponent(assetId)}`,
+    );
+  } catch (error) {
+    state.privateAssetDetail = DEMO_PRIVATE_DETAILS[assetId] || null;
+    state.privateComparison = state.privateAssetDetail
+      ? {
+          asset_id: assetId,
+          reference_symbol: state.privateAssetDetail.asset.reference_symbol,
+          status: "COMPARISON_UNAVAILABLE",
+          reason: "PROVIDER_CLAIMS_NOT_CANONICALLY_COMPARABLE",
+          numeric_basis_bps: null,
+          competition_domain: "PRIVATE_MARKET",
+          representations: state.privateAssetDetail.representations,
+        }
+      : null;
+    state.privateMarketsError = error.message || "PRIVATE_MARKET_ASSET_UNAVAILABLE";
+  }
+  render();
+}
+
+function formatPrivatePrice(priceQ9) {
+  if (priceQ9 === null || priceQ9 === undefined) return "—";
+  return (Number(priceQ9) / 1_000_000_000).toFixed(2);
+}
+
+function privateStatusLabel(exhibition) {
+  if (!exhibition) return "METADATA ONLY";
+  return exhibition.eligible ? "EXHIBITION READY" : "METADATA ONLY";
 }
 
 function renderTopbar() {
@@ -479,19 +640,63 @@ function renderReplay() {
     </article>`;
 }
 
+function renderPrivateRepresentation(representation) {
+  return `
+    <article class="representation-card">
+      <div class="row"><div><span class="mode-label">${escapeHtml(representation.provider)}</span><h3>${escapeHtml(representation.representation_symbol)}</h3></div><span class="status-pill">${escapeHtml(representation.lifecycle_status || "UNSPECIFIED")}</span></div>
+      <div class="private-detail-grid">
+        <div><span class="private-label">Structure</span><strong>${escapeHtml(representation.structure_kind)}</strong></div>
+        <div><span class="private-label">Mark</span><strong>${formatPrivatePrice(representation.mark_price_q9)}</strong></div>
+        <div><span class="private-label">Comparability</span><strong>${escapeHtml(representation.comparability)}</strong></div>
+        <div><span class="private-label">Rated</span><strong>NO</strong></div>
+      </div>
+      <p class="card-copy">${escapeHtml(representation.provider_disclosure)}</p>
+      ${representation.source_url ? `<a class="provider-link" href="${escapeHtml(representation.source_url)}" target="_blank" rel="noreferrer">VIEW PROVIDER SOURCE</a>` : `<span class="muted">PROVIDER SOURCE URL NOT PROVIDED</span>`}
+    </article>`;
+}
+
 function renderPrivate() {
+  const catalog = state.privateMarkets || DEMO_PRIVATE_MARKETS;
+  const exhibition = catalog.exhibition || DEMO_PRIVATE_MARKETS.exhibition;
+  const assets = catalog.assets || [];
+  const detail = state.privateAssetDetail;
+  const comparison = state.privateComparison;
+  const fallbackNotice = state.privateMarketsError
+    ? `<div class="alert"><strong>READ-ONLY FALLBACK:</strong> Provider/API data is unavailable (${escapeHtml(state.privateMarketsError)}). Public Ranked is unaffected; showing checked-in demo metadata only.</div>`
+    : "";
+  const assetCards = assets.length
+    ? assets
+        .map(
+          (asset) => `<button class="private-asset-card" data-action="private-asset" data-asset-id="${escapeHtml(asset.id)}"><div class="row"><span class="asset-symbol">${escapeHtml(asset.reference_symbol)}</span><span class="status-pill">${escapeHtml(asset.representation_count)} REP${asset.representation_count === 1 ? "" : "S"}</span></div><span class="asset-name">${escapeHtml(asset.display_name)}</span><span class="asset-meta">${escapeHtml(asset.providers.join(" · "))}</span><span class="muted">${escapeHtml(asset.competition_domain)} · ${asset.exhibition_eligible ? "EXHIBITION READY" : "EXHIBITION UNAVAILABLE"}</span></button>`,
+        )
+        .join("")
+    : `<div class="empty-state">No provider representations are currently available. The private surface is unavailable rather than fabricated.</div>`;
+  const detailMarkup = detail
+    ? `
+      <article class="card private-detail">
+        <div class="section-heading"><div><p class="eyebrow">Reference Asset</p><h2>${escapeHtml(detail.asset.reference_symbol)}</h2></div><button class="button ghost" data-action="private-clear">CLOSE</button></div>
+        <div class="source-line"><span class="domain-pill">PRIVATE MARKET</span><span class="status-pill">${escapeHtml(privateStatusLabel(detail.exhibition))}</span></div>
+        <div class="grid two">${detail.representations.map(renderPrivateRepresentation).join("")}</div>
+        ${comparison ? `<div class="comparison-panel"><div class="row"><strong>Comparison</strong><span class="status-pill">${escapeHtml(comparison.status)}</span></div><p class="card-copy">${escapeHtml(comparison.reason)}. No numeric basis is displayed because the provider claims are not canonically comparable.</p></div>` : ""}
+      </article>`
+    : "";
+
   return `
     <section class="hero">
       <p class="eyebrow">Separate competition domain</p>
       <h1>Private Markets.</h1>
       <p class="lede">Provider context is useful. It is not permission to merge different economic claims into Public Equity Elo.</p>
     </section>
+    ${fallbackNotice}
     <article class="card">
-      <div class="source-line"><span class="domain-pill">PRIVATE MARKET</span><span class="status-pill">METADATA ONLY</span></div>
-      <div class="alert"><strong>Exhibition boundary:</strong> PreStocks and Tessera representations can have different legal structures, rights, multipliers, and lifecycle states. Numeric comparison stays unavailable unless a versioned policy permits it.</div>
-      <div class="grid two"><div><h3>PreStocks</h3><p class="card-copy">Provider-described private exposure. Not Public Ranked eligible in this build.</p></div><div><h3>Tessera</h3><p class="card-copy">Provider-described participation representation. Not silently treated as equity.</p></div></div>
-      <div class="proof-actions"><button class="button secondary" data-action="home">BACK TO PUBLIC RANKED</button></div>
-    </article>`;
+      <div class="source-line"><span class="domain-pill">${escapeHtml(catalog.competition_domain)}</span><span class="status-pill">${escapeHtml(privateStatusLabel(exhibition))}</span></div>
+      <div class="row"><div><h2>Provider representations</h2><p class="card-copy">Captured metadata from PreStocks and Tessera. The card describes structure and lifecycle instead of implying ordinary company shares.</p></div><span class="muted">${assets.length} reference assets</span></div>
+      <div class="alert"><strong>Rating isolation:</strong> Private Market results are exhibition-only by default. They cannot update Public Equity Elo, the global leaderboard, or competitive achievements.</div>
+      <div class="exhibition-panel"><div><span class="private-label">Exhibition readiness</span><strong>${escapeHtml(exhibition.status)}</strong><span class="muted">${escapeHtml(exhibition.reason)} · ${escapeHtml(exhibition.usable_reference_asset_count)}/${escapeHtml(exhibition.minimum_reference_asset_count)} usable references</span></div><button class="button secondary" data-action="private-exhibition" ${exhibition.eligible ? "" : "disabled"}>${exhibition.eligible ? "OPEN EXHIBITION" : "GATE CLOSED"}</button></div>
+      ${state.privateMarketsLoading ? `<div class="empty-state">Refreshing provider metadata…</div>` : `<div class="private-asset-grid">${assetCards}</div>`}
+    </article>
+    ${detailMarkup}
+    <div class="proof-actions"><button class="button secondary" data-action="home">BACK TO PUBLIC RANKED</button></div>`;
 }
 
 function renderView() {
@@ -519,6 +724,7 @@ function renderNav() {
   const items = [
     ["home", "HOME"],
     ["queue", "RANKED"],
+    ["private", "PRIVATE"],
     ["replay", "REPLAY"],
     ["proof", "PROOF"],
   ];
@@ -597,9 +803,28 @@ document.addEventListener("click", async (event) => {
   const target = event.target.closest("[data-action]");
   if (!target) return;
   const action = target.dataset.action;
-  if (action === "home" || action === "queue" || action === "private" || action === "battle" || action === "result" || action === "proof") {
+  if (action === "private") {
+    await loadPrivateMarkets();
+    setView("private");
+    return;
+  }
+  if (action === "home" || action === "queue" || action === "battle" || action === "result" || action === "proof") {
     if (action === "proof") await loadProof();
     setView(action === "home" ? "home" : action);
+    return;
+  }
+  if (action === "private-asset") {
+    await loadPrivateAsset(target.dataset.assetId);
+    return;
+  }
+  if (action === "private-clear") {
+    state.privateAssetDetail = null;
+    state.privateComparison = null;
+    render();
+    return;
+  }
+  if (action === "private-exhibition") {
+    showToast("Private exhibition readiness is isolated and unrated; no Battle or Public Elo mutation is submitted by this client.");
     return;
   }
   if (action === "start-roster") {

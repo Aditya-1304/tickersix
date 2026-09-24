@@ -7,6 +7,9 @@ const requiredMarkers = [
   ["app.js", "REPLAY - FINALIZED HISTORICAL DEVNET ROUND"],
   ["app.js", "COMPARISON_UNAVAILABLE"],
   ["app.js", "competitive_effects"],
+  ["app.js", "PRIVATE_MARKET"],
+  ["app.js", "PROVIDER_CLAIMS_NOT_CANONICALLY_COMPARABLE"],
+  ["app.js", "/v1/private-markets/assets"],
 ];
 
 for (const file of requiredFiles) await readFile(new URL(`./${file}`, import.meta.url));

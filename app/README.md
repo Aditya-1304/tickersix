@@ -1,6 +1,6 @@
 # TickerSix consumer app
 
-This is the Phase 4 Slice 2 mobile-first consumer surface. It has no runtime dependency, no paid provider, and no RPC client. The client reads the backend API when it is available and falls back to clearly labelled local demo data when it is not.
+This is the mobile-first consumer surface for Public Ranked, replay, proof, and the isolated Private Markets domain. It has no runtime dependency, no paid provider, and no RPC client. The client reads the backend API when it is available and falls back to clearly labelled local demo data when it is not.
 
 The demo surface performs no wallet signing, transaction submission, settlement, rating update, or achievement update. The production queue mutation still requires the backend authentication/session flow.
 
