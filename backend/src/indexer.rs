@@ -6,9 +6,12 @@
 
 use std::fmt;
 
-use sqlx::{PgPool, Row};
+use sqlx::{PgPool, Postgres, Row, Transaction};
 
-use crate::league;
+use crate::{
+    battle_facts::{self, IndexedBattleFacts},
+    league,
+};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IndexerError {
@@ -16,6 +19,8 @@ pub enum IndexerError {
     InvalidLeague,
     InvalidLeagueMember,
     InvalidBattle,
+    InvalidBattleFacts,
+    BattleFactsConflict,
     LeagueMembershipConflict,
     ExposureConflict,
     Storage(String),
@@ -30,6 +35,10 @@ impl fmt::Display for IndexerError {
                 "indexed LeagueMember does not match the canonical League and wallet"
             }
             Self::InvalidBattle => "indexed Battle contains invalid terminal result or score data",
+            Self::InvalidBattleFacts => "indexed Battle contains invalid finalized lineup evidence",
+            Self::BattleFactsConflict => {
+                "indexed Battle finalized evidence conflicts with stored facts"
+            }
             Self::LeagueMembershipConflict => {
                 "indexed LeagueMember conflicts with the pending membership lifecycle"
             }
@@ -110,6 +119,11 @@ pub struct IndexedBattle {
     pub result: Option<String>,
     pub score_a_q9: Option<i64>,
     pub score_b_q9: Option<i64>,
+    /// Finalized lineup, captain, return, and chain-finalization facts.
+    ///
+    /// This remains optional for non-played and non-rated Battles, but it is
+    /// mandatory for terminal played rated League Battles.
+    pub finalized_facts: Option<IndexedBattleFacts>,
     pub indexed_at: i64,
 }
 
@@ -128,9 +142,8 @@ pub fn validate_battle(battle: &IndexedBattle) -> Result<(), IndexerError> {
         return Err(IndexerError::InvalidBattle);
     }
 
-    let terminal_league_battle = battle.mode == "LEAGUE"
-        && battle.rated
-        && matches!(battle.state.as_str(), "FINALIZED" | "SETTLED" | "VOIDED");
+    let terminal_state = matches!(battle.state.as_str(), "FINALIZED" | "SETTLED" | "VOIDED");
+    let terminal_league_battle = battle.mode == "LEAGUE" && battle.rated && terminal_state;
     if terminal_league_battle
         && !matches!(
             battle.result.as_deref(),
@@ -163,6 +176,27 @@ pub fn validate_battle(battle: &IndexedBattle) -> Result<(), IndexerError> {
         };
         if !result_matches {
             return Err(IndexerError::InvalidBattle);
+        }
+
+        let Some(facts) = battle.finalized_facts.as_ref() else {
+            return Err(IndexerError::InvalidBattleFacts);
+        };
+        battle_facts::validate(facts, score_a, score_b)
+            .map_err(|_| IndexerError::InvalidBattleFacts)?;
+    }
+
+    if let Some(facts) = battle.finalized_facts.as_ref() {
+        // Rated League played Battles were validated above; this branch covers
+        // other terminal played Battle projections that carry the same facts.
+        if !(terminal_league_battle && played_result) {
+            if !terminal_state || !played_result {
+                return Err(IndexerError::InvalidBattleFacts);
+            }
+            let (Some(score_a), Some(score_b)) = (battle.score_a_q9, battle.score_b_q9) else {
+                return Err(IndexerError::InvalidBattleFacts);
+            };
+            battle_facts::validate(facts, score_a, score_b)
+                .map_err(|_| IndexerError::InvalidBattleFacts)?;
         }
     }
     Ok(())
@@ -250,6 +284,7 @@ pub async fn upsert_market_round(
 
 pub async fn upsert_battle(pool: &PgPool, battle: &IndexedBattle) -> Result<(), IndexerError> {
     validate_battle(battle)?;
+    let mut transaction = pool.begin().await.map_err(storage_error)?;
 
     sqlx::query(
         "INSERT INTO users (wallet, created_at)
@@ -259,7 +294,7 @@ pub async fn upsert_battle(pool: &PgPool, battle: &IndexedBattle) -> Result<(), 
     .bind(&battle.player_a)
     .bind(&battle.player_b)
     .bind(battle.indexed_at)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await
     .map_err(storage_error)?;
 
@@ -297,9 +332,20 @@ pub async fn upsert_battle(pool: &PgPool, battle: &IndexedBattle) -> Result<(), 
     .bind(battle.score_a_q9)
     .bind(battle.score_b_q9)
     .bind(battle.indexed_at)
-    .execute(pool)
+    .execute(&mut *transaction)
     .await
     .map_err(storage_error)?;
+
+    if let Some(facts) = battle.finalized_facts.as_ref() {
+        persist_battle_facts(
+            &mut transaction,
+            &battle.chain_pubkey,
+            facts,
+            battle.indexed_at,
+        )
+        .await?;
+    }
+    transaction.commit().await.map_err(storage_error)?;
 
     if matches!(battle.state.as_str(), "FINALIZED" | "SETTLED" | "VOIDED") {
         crate::replay::record_final_event(
@@ -334,6 +380,79 @@ pub async fn upsert_battle(pool: &PgPool, battle: &IndexedBattle) -> Result<(), 
         )
         .await
         .map_err(|error| IndexerError::Storage(error.to_string()))?;
+    }
+    Ok(())
+}
+
+struct SerializedBattleFacts {
+    side_a_lineup: String,
+    side_a_returns_q9: String,
+    side_b_lineup: String,
+    side_b_returns_q9: String,
+}
+
+fn serialize_battle_facts(
+    facts: &IndexedBattleFacts,
+) -> Result<SerializedBattleFacts, IndexerError> {
+    Ok(SerializedBattleFacts {
+        side_a_lineup: serde_json::to_string(&facts.side_a_lineup)
+            .map_err(|_| IndexerError::InvalidBattleFacts)?,
+        side_a_returns_q9: serde_json::to_string(&facts.side_a_returns_q9)
+            .map_err(|_| IndexerError::InvalidBattleFacts)?,
+        side_b_lineup: serde_json::to_string(&facts.side_b_lineup)
+            .map_err(|_| IndexerError::InvalidBattleFacts)?,
+        side_b_returns_q9: serde_json::to_string(&facts.side_b_returns_q9)
+            .map_err(|_| IndexerError::InvalidBattleFacts)?,
+    })
+}
+
+/// Stores finalized evidence immutably while allowing a newer index timestamp
+/// for an identical replay. The conflict predicate is evaluated inside the
+/// PostgreSQL upsert, so concurrent indexer workers cannot silently replace
+/// authoritative facts with a different lineup or return set.
+async fn persist_battle_facts(
+    transaction: &mut Transaction<'_, Postgres>,
+    battle_pubkey: &str,
+    facts: &IndexedBattleFacts,
+    indexed_at: i64,
+) -> Result<(), IndexerError> {
+    let serialized = serialize_battle_facts(facts)?;
+    let result = sqlx::query(
+        "INSERT INTO battle_competitive_facts
+            (battle_pubkey, facts_version, finalized_slot,
+             side_a_lineup, side_a_captain, side_a_returns_q9,
+             side_b_lineup, side_b_captain, side_b_returns_q9, indexed_at)
+         VALUES ($1, $2, $3, $4::jsonb, $5, $6::jsonb,
+                 $7::jsonb, $8, $9::jsonb, $10)
+         ON CONFLICT (battle_pubkey) DO UPDATE SET
+             indexed_at = GREATEST(
+                 battle_competitive_facts.indexed_at, EXCLUDED.indexed_at
+             )
+         WHERE battle_competitive_facts.facts_version = EXCLUDED.facts_version
+           AND battle_competitive_facts.finalized_slot = EXCLUDED.finalized_slot
+           AND battle_competitive_facts.side_a_lineup = EXCLUDED.side_a_lineup
+           AND battle_competitive_facts.side_a_captain = EXCLUDED.side_a_captain
+           AND battle_competitive_facts.side_a_returns_q9 = EXCLUDED.side_a_returns_q9
+           AND battle_competitive_facts.side_b_lineup = EXCLUDED.side_b_lineup
+           AND battle_competitive_facts.side_b_captain = EXCLUDED.side_b_captain
+           AND battle_competitive_facts.side_b_returns_q9 = EXCLUDED.side_b_returns_q9",
+    )
+    .bind(battle_pubkey)
+    .bind(facts.facts_version)
+    .bind(facts.finalized_slot)
+    .bind(serialized.side_a_lineup)
+    .bind(i32::from(facts.side_a_captain))
+    .bind(serialized.side_a_returns_q9)
+    .bind(serialized.side_b_lineup)
+    .bind(i32::from(facts.side_b_captain))
+    .bind(serialized.side_b_returns_q9)
+    .bind(indexed_at)
+    .execute(&mut **transaction)
+    .await
+    .map_err(storage_error)?;
+
+    if result.rows_affected() == 0 {
+        return Err(IndexerError::BattleFactsConflict);
     }
     Ok(())
 }
@@ -510,6 +629,7 @@ mod tests {
             result: Some("PLAYER_A".to_owned()),
             score_a_q9: None,
             score_b_q9: None,
+            finalized_facts: None,
             indexed_at: 10,
         };
 
@@ -517,9 +637,48 @@ mod tests {
 
         battle.score_a_q9 = Some(60_000_000);
         battle.score_b_q9 = Some(40_000_000);
-        assert!(validate_battle(&battle).is_ok());
+        assert_eq!(
+            validate_battle(&battle),
+            Err(IndexerError::InvalidBattleFacts)
+        );
 
         battle.result = Some("DRAW".to_owned());
         assert_eq!(validate_battle(&battle), Err(IndexerError::InvalidBattle));
+    }
+
+    #[test]
+    fn indexer_accepts_a_terminal_played_battle_only_with_matching_finalized_facts() {
+        let mut battle = IndexedBattle {
+            chain_pubkey: bs58::encode([8; 32]).into_string(),
+            market_round_id: 3,
+            mode: "LEAGUE".to_owned(),
+            rated: true,
+            settlement_source_kind: Some("JUPITER_TOKEN_SPOT_V1".to_owned()),
+            player_a: bs58::encode([1; 32]).into_string(),
+            player_b: bs58::encode([2; 32]).into_string(),
+            state: "SETTLED".to_owned(),
+            result: Some("PLAYER_A".to_owned()),
+            score_a_q9: Some(48),
+            score_b_q9: Some(10),
+            finalized_facts: Some(IndexedBattleFacts {
+                facts_version: 1,
+                finalized_slot: 900,
+                side_a_lineup: vec![1, 2, 3, 4, 5, 6],
+                side_a_captain: 1,
+                side_a_returns_q9: [70, 60, 50, 40, 30, 20],
+                side_b_lineup: vec![7, 8, 9, 10, 11, 12],
+                side_b_captain: 7,
+                side_b_returns_q9: [10, 10, 10, 10, 10, 10],
+            }),
+            indexed_at: 10,
+        };
+
+        assert!(validate_battle(&battle).is_ok());
+
+        battle.score_a_q9 = Some(49);
+        assert_eq!(
+            validate_battle(&battle),
+            Err(IndexerError::InvalidBattleFacts)
+        );
     }
 }

@@ -29,6 +29,7 @@ pub mod achievements;
 pub mod api;
 pub mod attestor;
 pub mod auth;
+pub mod battle_facts;
 pub mod db;
 pub mod hardening;
 pub mod indexer;
