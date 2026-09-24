@@ -1,5 +1,5 @@
 use market_data::{
-    decide_private_market_activation, decide_pyth_activation, is_excluded_phase0_sponsor_provider,
+    decide_private_market_activation, decide_pyth_activation, is_excluded_sponsor_provider,
     parse_prestocks_catalog, parse_tessera_catalog, validate_pyth_payload, PrivateMarketActivation,
     PrivateRepresentationError, PythActivationDecision, PythActivationInputs, PythPayloadError,
     PythValidationPolicy,
@@ -178,8 +178,8 @@ fn private_market_parser_rejects_missing_provider_disclosure() {
 }
 
 #[test]
-fn phase0_explicitly_excludes_clawpump_and_meteora_from_sponsor_discovery() {
-    assert!(is_excluded_phase0_sponsor_provider("ClawPump"));
-    assert!(is_excluded_phase0_sponsor_provider("meteora"));
-    assert!(!is_excluded_phase0_sponsor_provider("PreStocks"));
+fn baseline_explicitly_excludes_clawpump_and_meteora_from_sponsor_discovery() {
+    assert!(is_excluded_sponsor_provider("ClawPump"));
+    assert!(is_excluded_sponsor_provider("meteora"));
+    assert!(!is_excluded_sponsor_provider("PreStocks"));
 }

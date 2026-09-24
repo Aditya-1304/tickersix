@@ -1,4 +1,4 @@
-//! Phase 6 failure classification and incident evidence retention.
+//! Failure classification and incident evidence retention.
 //!
 //! Provider and infrastructure failures are never converted into player
 //! penalties or silent source switches. The decision matrix is pure and is

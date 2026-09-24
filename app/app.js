@@ -874,7 +874,7 @@ function startReplay() {
 async function connectWallet() {
   const provider = window.solana;
   if (!provider?.connect) {
-    showToast("No wallet provider detected. Use the read-only demo flow; no signing is required for this UI slice.");
+    showToast("No wallet provider detected. Use the read-only demo flow; no signing is required for this UI demo.");
     return;
   }
   try {

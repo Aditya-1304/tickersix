@@ -161,7 +161,7 @@ pub fn handle_create_price_policy(
     Ok(())
 }
 
-/// Canonical Slice 1 entry point for creating an immutable settlement policy.
+/// Canonical beta evidence entry point for creating an immutable settlement policy.
 /// The legacy handler remains available so existing Jupiter clients can
 /// migrate without changing their report-message serialization in place.
 pub fn handle_create_settlement_policy(

@@ -1,4 +1,4 @@
-# Phase 0 Slice 0.2 sponsor fixtures
+# Sponsor readiness sponsor fixtures
 
 These files are provider-shaped review fixtures for the optional Pyth Pro,
 PreStocks, and Tessera spikes. They are not permanent live evidence, and they

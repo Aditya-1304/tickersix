@@ -1,4 +1,4 @@
-//! Read-only xStocks public contract checks for the Phase 0 baseline.
+//! Read-only xStocks public contract checks for the baseline baseline.
 //!
 //! xStocks metadata, price, multiplier, and corporate-action responses are
 //! provider inputs only. This module never promotes them into rated

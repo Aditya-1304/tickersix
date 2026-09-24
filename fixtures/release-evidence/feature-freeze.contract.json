@@ -1,0 +1,181 @@
+{
+  "schema_version": 1,
+  "mode": "contract",
+  "roadmap": "STOCKLANA_V2.1",
+  "cluster": "devnet",
+  "freeze_at": "2026-09-24T23:59:00+05:30",
+  "no_new_sponsor_scope": true,
+  "sponsor_tracks": [
+    "PYTH_PRO_VERIFIED_V1",
+    "PRESTOCKS",
+    "TESSERA"
+  ],
+  "pyth_enabled": false,
+  "beta_manifest_path": "fixtures/release-evidence/beta-evidence.contract.json",
+  "p0": [
+    {
+      "id": "wallet_authentication",
+      "status": "planned",
+      "evidence_path": "artifacts/release-evidence/freeze/wallet_authentication.json",
+      "note": "Tracked by the Release release record."
+    },
+    {
+      "id": "reference_asset_registry",
+      "status": "planned",
+      "evidence_path": "artifacts/release-evidence/freeze/reference_asset_registry.json",
+      "note": "Tracked by the Release release record."
+    },
+    {
+      "id": "dynamic_public_equity_universe",
+      "status": "planned",
+      "evidence_path": "artifacts/release-evidence/freeze/dynamic_public_equity_universe.json",
+      "note": "Tracked by the Release release record."
+    },
+    {
+      "id": "market_round",
+      "status": "planned",
+      "evidence_path": "artifacts/release-evidence/freeze/market_round.json",
+      "note": "Tracked by the Release release record."
+    },
+    {
+      "id": "battle",
+      "status": "planned",
+      "evidence_path": "artifacts/release-evidence/freeze/battle.json",
+      "note": "Tracked by the Release release record."
+    },
+    {
+      "id": "six_picks",
+      "status": "planned",
+      "evidence_path": "artifacts/release-evidence/freeze/six_picks.json",
+      "note": "Tracked by the Release release record."
+    },
+    {
+      "id": "captain",
+      "status": "planned",
+      "evidence_path": "artifacts/release-evidence/freeze/captain.json",
+      "note": "Tracked by the Release release record."
+    },
+    {
+      "id": "immutable_commit_reveal",
+      "status": "planned",
+      "evidence_path": "artifacts/release-evidence/freeze/immutable_commit_reveal.json",
+      "note": "Tracked by the Release release record."
+    },
+    {
+      "id": "jupiter_settlement",
+      "status": "planned",
+      "evidence_path": "artifacts/release-evidence/freeze/jupiter_settlement.json",
+      "note": "Tracked by the Release release record."
+    },
+    {
+      "id": "q9_score_winner",
+      "status": "planned",
+      "evidence_path": "artifacts/release-evidence/freeze/q9_score_winner.json",
+      "note": "Tracked by the Release release record."
+    },
+    {
+      "id": "ranked_queue",
+      "status": "planned",
+      "evidence_path": "artifacts/release-evidence/freeze/ranked_queue.json",
+      "note": "Tracked by the Release release record."
+    },
+    {
+      "id": "public_rating_update",
+      "status": "planned",
+      "evidence_path": "artifacts/release-evidence/freeze/public_rating_update.json",
+      "note": "Tracked by the Release release record."
+    },
+    {
+      "id": "public_leaderboard",
+      "status": "planned",
+      "evidence_path": "artifacts/release-evidence/freeze/public_leaderboard.json",
+      "note": "Tracked by the Release release record."
+    },
+    {
+      "id": "official_league_swiss",
+      "status": "planned",
+      "evidence_path": "artifacts/release-evidence/freeze/official_league_swiss.json",
+      "note": "Tracked by the Release release record."
+    },
+    {
+      "id": "live_projected_score",
+      "status": "planned",
+      "evidence_path": "artifacts/release-evidence/freeze/live_projected_score.json",
+      "note": "Tracked by the Release release record."
+    },
+    {
+      "id": "source_aware_proof",
+      "status": "planned",
+      "evidence_path": "artifacts/release-evidence/freeze/source_aware_proof.json",
+      "note": "Tracked by the Release release record."
+    },
+    {
+      "id": "mobile_usable_ui",
+      "status": "planned",
+      "evidence_path": "artifacts/release-evidence/freeze/mobile_usable_ui.json",
+      "note": "Tracked by the Release release record."
+    },
+    {
+      "id": "replay_demo",
+      "status": "planned",
+      "evidence_path": "artifacts/release-evidence/freeze/replay_demo.json",
+      "note": "Tracked by the Release release record."
+    },
+    {
+      "id": "zero_cost_devnet",
+      "status": "planned",
+      "evidence_path": "artifacts/release-evidence/freeze/zero_cost_devnet.json",
+      "note": "Tracked by the Release release record."
+    }
+  ],
+  "p1": [
+    {
+      "id": "pyth_verified_optional",
+      "status": "planned",
+      "evidence_path": "artifacts/release-evidence/freeze/pyth_verified_optional.json",
+      "note": "Tracked by the Release release record."
+    },
+    {
+      "id": "pyth_proof_panel",
+      "status": "planned",
+      "evidence_path": "artifacts/release-evidence/freeze/pyth_proof_panel.json",
+      "note": "Tracked by the Release release record."
+    },
+    {
+      "id": "prestocks_adapter",
+      "status": "planned",
+      "evidence_path": "artifacts/release-evidence/freeze/prestocks_adapter.json",
+      "note": "Tracked by the Release release record."
+    },
+    {
+      "id": "tessera_representation_cards",
+      "status": "planned",
+      "evidence_path": "artifacts/release-evidence/freeze/tessera_representation_cards.json",
+      "note": "Tracked by the Release release record."
+    },
+    {
+      "id": "private_markets_ui",
+      "status": "planned",
+      "evidence_path": "artifacts/release-evidence/freeze/private_markets_ui.json",
+      "note": "Tracked by the Release release record."
+    },
+    {
+      "id": "commit_reveal_recovery",
+      "status": "planned",
+      "evidence_path": "artifacts/release-evidence/freeze/commit_reveal_recovery.json",
+      "note": "Tracked by the Release release record."
+    },
+    {
+      "id": "achievements_titles",
+      "status": "planned",
+      "evidence_path": "artifacts/release-evidence/freeze/achievements_titles.json",
+      "note": "Tracked by the Release release record."
+    },
+    {
+      "id": "observability_proof_assets",
+      "status": "planned",
+      "evidence_path": "artifacts/release-evidence/freeze/observability_proof_assets.json",
+      "note": "Tracked by the Release release record."
+    }
+  ]
+}

@@ -1,17 +1,17 @@
-# Phase 7 beta evidence
+# Release beta evidence
 
 `beta-evidence.contract.json` is a checked-in contract fixture. It proves that
-Phase 7 evidence records use the Devnet-only, zero-cost schema and preserve the
+Release evidence records use the Devnet-only, zero-cost schema and preserve the
 Public Ranked / Private Markets boundary. It intentionally does not claim that
 real tester sessions, proof transactions, screenshots, or the 100-player
 simulation have happened.
 
 For a real beta run, create an operator-owned evidence record with
 `"mode": "evidence"` and keep the referenced files under an untracked
-`artifacts/phase7/` directory. Run:
+`artifacts/release-evidence/` directory. Run:
 
 ```bash
-cargo run -p backend -- phase7-slice1-gate path/to/beta-evidence.json
+cargo run -p backend -- beta-evidence-gate path/to/beta-evidence.json
 ```
 
 The command exits successfully for the checked-in contract fixture. An
@@ -25,13 +25,13 @@ completed 100-player League report.
 `feature-freeze.contract.json` pins the exact V2.1 P0/P1 scope, the 2026-09-24
 23:59 IST freeze, the allowed Pyth/PreStocks/Tessera sponsor tracks, and the
 no-new-sponsor-scope rule. Its `contract` mode is intentionally not release
-ready. Change it to `freeze` only in an operator-owned record after Slice 1
+ready. Change it to `freeze` only in an operator-owned record after beta evidence
 evidence is real and every required status is verified.
 
-Run the offline Slice 2 contract gate with:
+Run the offline release freeze contract gate with:
 
 ```bash
-cargo run -p backend -- phase7-slice2-gate \
-  fixtures/phase7/feature-freeze.contract.json \
-  fixtures/phase7/beta-evidence.contract.json
+cargo run -p backend -- release-freeze-gate \
+  fixtures/release-evidence/feature-freeze.contract.json \
+  fixtures/release-evidence/beta-evidence.contract.json
 ```

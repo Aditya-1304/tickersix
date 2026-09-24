@@ -1110,7 +1110,7 @@ pub fn validate_batched_sampling_plan(
 }
 
 /// Calculates the aggregate request rate for a batched sampling plan without
-/// applying a provider limit. Keeping this arithmetic public lets the Phase 0
+/// applying a provider limit. Keeping this arithmetic public lets the baseline
 /// baseline report the exact measured rate alongside its pass/fail decision.
 pub fn sampling_plan_rate_milli_rps(
     attestor_count: usize,

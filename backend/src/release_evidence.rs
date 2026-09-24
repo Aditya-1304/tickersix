@@ -1,4 +1,4 @@
-//! Phase 7 beta-evidence contracts.
+//! Beta evidence contracts for release readiness.
 //!
 //! The beta gate separates reproducible contract validation from evidence
 //! collected during real Devnet use. A checked-in template can prove that the
@@ -110,7 +110,7 @@ pub struct EvidenceCheck {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct BetaEvidenceReport {
-    pub slice: &'static str,
+    pub scope: &'static str,
     pub mode: String,
     pub contract_valid: bool,
     pub release_ready: bool,
@@ -123,7 +123,7 @@ enum CheckKind {
     ExternalEvidence,
 }
 
-/// Validates the Phase 7 beta record without inventing external evidence.
+/// Validates the beta evidence record without inventing external evidence.
 ///
 /// Contract mode is intentionally useful for CI: it verifies the shape and
 /// safety invariants of the record while reporting release readiness as false.
@@ -164,7 +164,7 @@ pub fn validate_beta_evidence(manifest: &BetaEvidenceManifest) -> BetaEvidenceRe
         CheckKind::Contract,
         "cluster",
         manifest.cluster == DEVNET_CLUSTER,
-        "Phase 7 evidence must target Solana Devnet".to_owned(),
+        "Beta evidence must target Solana Devnet".to_owned(),
     );
     record_check(
         &mut checks,
@@ -384,14 +384,14 @@ pub fn validate_beta_evidence(manifest: &BetaEvidenceManifest) -> BetaEvidenceRe
         "external_beta_evidence",
         release_ready,
         if release_ready {
-            "all Phase 7 beta evidence is recorded".to_owned()
+            "all beta evidence is recorded".to_owned()
         } else {
             "checked-in contracts do not claim that external beta evidence exists".to_owned()
         },
     );
 
     BetaEvidenceReport {
-        slice: "phase7.1",
+        scope: "beta_evidence",
         mode: manifest.mode.clone(),
         contract_valid,
         release_ready,
@@ -483,20 +483,20 @@ pub struct FreezeItem {
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct FeatureFreezeReport {
-    pub slice: &'static str,
+    pub scope: &'static str,
     pub mode: String,
     pub contract_valid: bool,
     pub release_ready: bool,
     pub checks: Vec<EvidenceCheck>,
 }
 
-/// Validates the Phase 7 feature-freeze record against the documented P0/P1
-/// scope and the Slice 1 beta report.
+/// Validates the release-freeze record against the documented P0/P1
+/// scope and the beta evidence report.
 ///
 /// The contract fixture is suitable for local CI and remains deliberately
 /// non-ready. A freeze-mode record can become release-ready only when every P0
 /// item is green, every non-disabled P1 item is green, the optional Pyth state
-/// is internally consistent, and Slice 1 has real evidence-mode readiness.
+/// is internally consistent, and beta evidence has real evidence-mode readiness.
 pub fn validate_feature_freeze(
     manifest: &FeatureFreezeManifest,
     beta_report: &BetaEvidenceReport,
@@ -552,7 +552,7 @@ pub fn validate_feature_freeze(
         CheckKind::Contract,
         "no_new_sponsor_scope",
         manifest.no_new_sponsor_scope,
-        "new sponsor scope is forbidden after the Phase 7 freeze".to_owned(),
+        "new sponsor scope is forbidden after the release freeze".to_owned(),
     );
 
     let sponsor_tracks = manifest
@@ -580,8 +580,8 @@ pub fn validate_feature_freeze(
         &mut external_evidence_valid,
         CheckKind::Contract,
         "beta_manifest_path",
-        valid_phase7_path(&manifest.beta_manifest_path),
-        "the freeze must point to a scoped Phase 7 beta manifest".to_owned(),
+        valid_release_evidence_path(&manifest.beta_manifest_path),
+        "the freeze must point to a scoped beta manifest".to_owned(),
     );
 
     let p0_shape_valid = scope_items_have_exact_ids(&manifest.p0, P0_SCOPE)
@@ -648,7 +648,7 @@ pub fn validate_feature_freeze(
         CheckKind::ExternalEvidence,
         "beta_evidence_compatibility",
         beta_compatible,
-        "the freeze must consume a matching Slice 1 beta report".to_owned(),
+        "the freeze must consume a matching beta evidence beta report".to_owned(),
     );
 
     let release_ready = manifest.mode == FREEZE_MODE
@@ -670,7 +670,7 @@ pub fn validate_feature_freeze(
     );
 
     FeatureFreezeReport {
-        slice: "phase7.2",
+        scope: "release_freeze",
         mode: manifest.mode.clone(),
         contract_valid,
         release_ready,
@@ -695,10 +695,11 @@ fn scope_items_have_valid_paths(items: &[FreezeItem]) -> bool {
     })
 }
 
-fn valid_phase7_path(value: &str) -> bool {
+fn valid_release_evidence_path(value: &str) -> bool {
     let path = Path::new(value);
     !value.trim().is_empty()
-        && (value.starts_with("artifacts/phase7/") || value.starts_with("fixtures/phase7/"))
+        && (value.starts_with("artifacts/release-evidence/")
+            || value.starts_with("fixtures/release-evidence/"))
         && !path.is_absolute()
         && path
             .components()
@@ -708,7 +709,7 @@ fn valid_phase7_path(value: &str) -> bool {
 fn valid_artifact_path(value: &str) -> bool {
     let path = Path::new(value);
     !value.trim().is_empty()
-        && value.starts_with("artifacts/phase7/")
+        && value.starts_with("artifacts/release-evidence/")
         && !path.is_absolute()
         && path
             .components()
@@ -748,7 +749,7 @@ mod tests {
                         recorded: true,
                         battle_count: 1,
                         source_kind: JUPITER_SOURCE_KIND.to_owned(),
-                        evidence_path: format!("artifacts/phase7/window-{index}.json"),
+                        evidence_path: format!("artifacts/release-evidence/window-{index}.json"),
                     })
                     .collect()
             } else {
@@ -763,7 +764,7 @@ mod tests {
                     "pending"
                 }
                 .to_owned(),
-                evidence_path: "artifacts/phase7/jupiter.json".to_owned(),
+                evidence_path: "artifacts/release-evidence/jupiter.json".to_owned(),
                 transaction_signature: evidence.then(|| "signature-jupiter".to_owned()),
             },
             pyth_proof: Some(PythProofEvidence {
@@ -771,13 +772,13 @@ mod tests {
                 recorded: false,
                 network: DEVNET_CLUSTER.to_owned(),
                 battle_id: "pending".to_owned(),
-                evidence_path: "artifacts/phase7/pyth.json".to_owned(),
+                evidence_path: "artifacts/release-evidence/pyth.json".to_owned(),
                 transaction_signature: None,
                 reason: "Pyth remains optional and is not enabled in this record.".to_owned(),
             }),
             private_market_demo: PrivateMarketDemoEvidence {
                 recorded: evidence,
-                screenshot_paths: vec!["artifacts/phase7/private-market.png".to_owned()],
+                screenshot_paths: vec!["artifacts/release-evidence/private-market.png".to_owned()],
                 separate_public_ranked_domain: true,
                 public_elo_mutated: false,
             },
@@ -787,7 +788,7 @@ mod tests {
                 unique_players: REQUIRED_LEAGUE_PLAYERS,
                 round_count: 5,
                 one_active_pairing_per_player: true,
-                evidence_path: "artifacts/phase7/league-100.json".to_owned(),
+                evidence_path: "artifacts/release-evidence/league-100.json".to_owned(),
             },
         }
     }
@@ -856,8 +857,8 @@ mod tests {
                 PLANNED_STATUS
             }
             .to_owned(),
-            evidence_path: format!("artifacts/phase7/freeze/{id}.json"),
-            note: "Tracked by the Phase 7 release record.".to_owned(),
+            evidence_path: format!("artifacts/release-evidence/freeze/{id}.json"),
+            note: "Tracked by the release record.".to_owned(),
         };
         FeatureFreezeManifest {
             schema_version: FEATURE_FREEZE_SCHEMA_VERSION,
@@ -871,7 +872,7 @@ mod tests {
                 .map(|track| (*track).to_owned())
                 .collect(),
             pyth_enabled: false,
-            beta_manifest_path: "fixtures/phase7/beta-evidence.contract.json".to_owned(),
+            beta_manifest_path: "fixtures/release-evidence/beta-evidence.contract.json".to_owned(),
             p0: P0_SCOPE.iter().map(|id| item(id)).collect(),
             p1: P1_SCOPE.iter().map(|id| item(id)).collect(),
         }

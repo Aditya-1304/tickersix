@@ -495,8 +495,8 @@ fn read_attestation_summaries(
         }
         require_keys_eq!(*account.owner, crate::id(), ErrorCode::InvalidAttestation);
         let data = account.try_borrow_data()?;
-        let mut slice: &[u8] = &data;
-        let report = PriceAttestation::try_deserialize(&mut slice)
+        let mut input_bytes: &[u8] = &data;
+        let report = PriceAttestation::try_deserialize(&mut input_bytes)
             .map_err(|_| error!(ErrorCode::InvalidAttestation))?;
         require_keys_eq!(report.round_asset, round_asset, ErrorCode::WrongMarketRound);
         require!(report.phase == phase, ErrorCode::InvalidAttestation);

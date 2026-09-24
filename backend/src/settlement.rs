@@ -10,7 +10,7 @@ use std::{error::Error, fmt, fs, path::Path};
 
 use serde::{Deserialize, Serialize};
 
-/// Phase 2 dispatches only the source selected by the frozen Market Round.
+/// Settlement dispatches only the source selected by the frozen Market Round.
 /// Jupiter is the permanent baseline; Pyth remains explicitly gated by the
 /// Gate 0B result carried in the settlement snapshot.
 pub use crate::proof::SourceKind as SettlementSourceKind;
@@ -116,7 +116,7 @@ impl fmt::Display for SettlementError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let message = match self {
             Self::UnsupportedSource => {
-                "settlement source is not enabled by the Phase 2 settlement path"
+                "settlement source is not enabled by the configured settlement path"
             }
             Self::PythGateNotPassed => "Pyth settlement is disabled until Gate 0B is verified",
             Self::DuplicateAsset => "settlement snapshot contains a duplicate asset",
@@ -406,7 +406,7 @@ mod tests {
     }
 
     #[test]
-    fn planner_fails_closed_for_sources_not_enabled_in_jupiter_slice() {
+    fn planner_fails_closed_for_sources_not_enabled_in_jupiter_baseline() {
         let snapshot = SettlementSnapshot {
             source_kind: SettlementSourceKind::Pyth247IndexV1,
             pyth_gate_0b_verified: false,

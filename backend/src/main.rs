@@ -38,13 +38,13 @@ pub mod leaderboard;
 pub mod league;
 pub mod live;
 pub mod metrics;
-pub mod phase7;
 pub mod private_markets;
 pub mod profile;
 pub mod proof;
 pub mod ranked;
 pub mod rating;
 pub mod recovery;
+pub mod release_evidence;
 pub mod replay;
 pub mod settlement;
 pub mod standings;
@@ -71,8 +71,8 @@ struct RecorderLine<'a> {
 }
 
 #[derive(Debug, Serialize)]
-struct Phase0Slice1Report {
-    slice: &'static str,
+struct MarketDataBaselineReport {
+    scope: &'static str,
     jupiter: market_data::JupiterBaselineAssessment,
     xstocks: XStocksBaselineSnapshot,
 }
@@ -126,16 +126,16 @@ struct ExcludedProvidersFixture {
 }
 
 #[derive(Debug, Serialize)]
-struct Phase0Slice2Report {
-    slice: &'static str,
+struct SponsorReadinessReport {
+    scope: &'static str,
     public_ranked_provider: &'static str,
     excluded_providers: Vec<&'static str>,
-    pyth: Phase0Slice2PythReport,
+    pyth: SponsorReadinessPythReport,
     private_market: market_data::PrivateMarketCatalogAssessment,
 }
 
 #[derive(Debug, Serialize)]
-struct Phase0Slice2PythReport {
+struct SponsorReadinessPythReport {
     feed_coverage_available: usize,
     feed_coverage_required: usize,
     target_feed_id: u32,
@@ -157,10 +157,10 @@ struct PrivateMarketSmokeReport {
 }
 
 #[derive(Debug, Serialize)]
-struct Phase7Slice2Report {
-    slice: &'static str,
-    beta: phase7::BetaEvidenceReport,
-    freeze: phase7::FeatureFreezeReport,
+struct ReleaseFreezeReport {
+    scope: &'static str,
+    beta: release_evidence::BetaEvidenceReport,
+    freeze: release_evidence::FeatureFreezeReport,
 }
 
 #[derive(Debug, Serialize)]
@@ -196,10 +196,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Some("record-market-data") => record_market_data().await?,
         Some("record-token-metadata") => record_token_metadata().await?,
         Some("analyze-market-data") => analyze_market_data()?,
-        Some("phase0-slice1-gate") => run_phase0_slice1_gate()?,
-        Some("phase0-slice2-gate") => run_phase0_slice2_gate()?,
-        Some("phase7-slice1-gate") => run_phase7_slice1_gate()?,
-        Some("phase7-slice2-gate") => run_phase7_slice2_gate()?,
+        Some("market-data-baseline-gate") => run_market_data_baseline_gate()?,
+        Some("sponsor-readiness-gate") => run_sponsor_readiness_gate()?,
+        Some("beta-evidence-gate") => run_beta_evidence_gate()?,
+        Some("release-freeze-gate") => run_release_freeze_gate()?,
         Some("jupiter-smoke") => run_jupiter_smoke().await?,
         Some("xstocks-smoke") => run_xstocks_smoke().await?,
         Some("private-market-smoke") => run_private_market_smoke().await?,
@@ -231,16 +231,16 @@ async fn main() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// Runs the offline Phase 0 Slice 0.1 gate against committed schema fixtures.
+/// Runs the offline Market-data baseline gate against committed schema fixtures.
 ///
 /// Fixture validation proves that the baseline policy and parser contracts are
 /// executable and reviewable without pretending that fixture data is fresh
 /// provider evidence. The live xStocks smoke command below is intentionally a
 /// separate read-only operation for that operational claim.
-fn run_phase0_slice1_gate() -> Result<(), Box<dyn Error>> {
+fn run_market_data_baseline_gate() -> Result<(), Box<dyn Error>> {
     let fixture_dir = env::args()
         .nth(2)
-        .unwrap_or_else(|| "fixtures/phase0".to_owned());
+        .unwrap_or_else(|| "fixtures/market-data".to_owned());
     let expected_symbol = env::args().nth(3).unwrap_or_else(|| "SPYx".to_owned());
     let fixture_root = Path::new(&fixture_dir);
     let xstocks_root = fixture_root.join("xstocks");
@@ -265,8 +265,8 @@ fn run_phase0_slice1_gate() -> Result<(), Box<dyn Error>> {
         &verified_token_program.token_program,
     )?;
 
-    let report = Phase0Slice1Report {
-        slice: "phase0.1",
+    let report = MarketDataBaselineReport {
+        scope: "market_data_baseline",
         jupiter,
         xstocks,
     };
@@ -274,15 +274,15 @@ fn run_phase0_slice1_gate() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// Runs the deterministic Phase 0 Slice 0.2 sponsor gate against committed
+/// Runs deterministic sponsor-readiness validation against committed
 /// fixtures. The gate validates provider-shaped data, exact timestamp/Q9
 /// policy, and the evidence required before any Pyth path could be promoted.
 /// It intentionally keeps Public Ranked on Jupiter because the checked-in
 /// Devnet evidence records no authorized verifier run.
-fn run_phase0_slice2_gate() -> Result<(), Box<dyn Error>> {
+fn run_sponsor_readiness_gate() -> Result<(), Box<dyn Error>> {
     let fixture_dir = env::args()
         .nth(2)
-        .unwrap_or_else(|| "fixtures/phase0/sponsors".to_owned());
+        .unwrap_or_else(|| "fixtures/market-data/sponsors".to_owned());
     let fixture_root = Path::new(&fixture_dir);
     let coverage: PythCoverageFixture = serde_json::from_str(&read_to_string(
         fixture_root.join("pyth-feed-coverage.json"),
@@ -336,11 +336,11 @@ fn run_phase0_slice2_gate() -> Result<(), Box<dyn Error>> {
 
     println!(
         "{}",
-        serde_json::to_string_pretty(&Phase0Slice2Report {
-            slice: "phase0.2",
+        serde_json::to_string_pretty(&SponsorReadinessReport {
+            scope: "sponsor_readiness",
             public_ranked_provider: "Jupiter",
-            excluded_providers: market_data::EXCLUDED_PHASE0_SPONSOR_PROVIDERS.to_vec(),
-            pyth: Phase0Slice2PythReport {
+            excluded_providers: market_data::EXCLUDED_SPONSOR_PROVIDERS.to_vec(),
+            pyth: SponsorReadinessPythReport {
                 feed_coverage_available: coverage.available_stable_equity_feed_count,
                 feed_coverage_required: coverage.required_public_equity_feed_count,
                 target_feed_id: coverage.target_feed_id,
@@ -360,66 +360,67 @@ fn run_phase0_slice2_gate() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// Runs the Phase 7 Slice 1 beta-evidence contract gate.
+/// Runs the beta evidence contract gate.
 ///
 /// Contract mode is intentionally accepted by this offline command so CI can
 /// validate the record shape without fabricating user sessions or Devnet
 /// transactions. An operator-supplied evidence-mode record must pass every
 /// external-evidence check before this command exits successfully.
-fn run_phase7_slice1_gate() -> Result<(), Box<dyn Error>> {
+fn run_beta_evidence_gate() -> Result<(), Box<dyn Error>> {
     let manifest_path = env::args()
         .nth(2)
-        .unwrap_or_else(|| "fixtures/phase7/beta-evidence.contract.json".to_owned());
-    let manifest: phase7::BetaEvidenceManifest =
+        .unwrap_or_else(|| "fixtures/release-evidence/beta-evidence.contract.json".to_owned());
+    let manifest: release_evidence::BetaEvidenceManifest =
         serde_json::from_str(&read_to_string(manifest_path)?)?;
-    let report = phase7::validate_beta_evidence(&manifest);
+    let report = release_evidence::validate_beta_evidence(&manifest);
     let release_ready = report.release_ready;
     let contract_valid = report.contract_valid;
 
     println!("{}", serde_json::to_string_pretty(&report)?);
 
     if !contract_valid {
-        return Err("Phase 7 beta-evidence contract is invalid".into());
+        return Err("beta-evidence contract is invalid".into());
     }
-    if manifest.mode == phase7::EVIDENCE_MODE && !release_ready {
-        return Err("Phase 7 beta evidence is incomplete".into());
+    if manifest.mode == release_evidence::EVIDENCE_MODE && !release_ready {
+        return Err("beta evidence is incomplete".into());
     }
     Ok(())
 }
 
-/// Runs the Phase 7 Slice 2 feature-freeze gate against a freeze record and
-/// the Slice 1 beta record it consumes. Contract mode remains available for
+/// Runs the release freeze gate against a freeze record and
+/// the beta evidence record it consumes. Contract mode remains available for
 /// offline CI; freeze mode exits successfully only after all P0/P1 and beta
 /// evidence checks are green.
-fn run_phase7_slice2_gate() -> Result<(), Box<dyn Error>> {
+fn run_release_freeze_gate() -> Result<(), Box<dyn Error>> {
     let freeze_path = env::args()
         .nth(2)
-        .unwrap_or_else(|| "fixtures/phase7/feature-freeze.contract.json".to_owned());
-    let freeze: phase7::FeatureFreezeManifest =
+        .unwrap_or_else(|| "fixtures/release-evidence/feature-freeze.contract.json".to_owned());
+    let freeze: release_evidence::FeatureFreezeManifest =
         serde_json::from_str(&read_to_string(&freeze_path)?)?;
     let beta_path = env::args()
         .nth(3)
         .unwrap_or_else(|| freeze.beta_manifest_path.clone());
-    let beta: phase7::BetaEvidenceManifest = serde_json::from_str(&read_to_string(beta_path)?)?;
-    let beta_report = phase7::validate_beta_evidence(&beta);
-    let freeze_report = phase7::validate_feature_freeze(&freeze, &beta_report);
+    let beta: release_evidence::BetaEvidenceManifest =
+        serde_json::from_str(&read_to_string(beta_path)?)?;
+    let beta_report = release_evidence::validate_beta_evidence(&beta);
+    let freeze_report = release_evidence::validate_feature_freeze(&freeze, &beta_report);
     let contract_valid = freeze_report.contract_valid;
     let release_ready = freeze_report.release_ready;
 
     println!(
         "{}",
-        serde_json::to_string_pretty(&Phase7Slice2Report {
-            slice: "phase7.2",
+        serde_json::to_string_pretty(&ReleaseFreezeReport {
+            scope: "release_freeze",
             beta: beta_report,
             freeze: freeze_report,
         })?
     );
 
     if !contract_valid {
-        return Err("Phase 7 feature-freeze contract is invalid".into());
+        return Err("feature-freeze contract is invalid".into());
     }
-    if freeze.mode == phase7::FREEZE_MODE && !release_ready {
-        return Err("Phase 7 feature freeze is incomplete".into());
+    if freeze.mode == release_evidence::FREEZE_MODE && !release_ready {
+        return Err("feature freeze is incomplete".into());
     }
     Ok(())
 }
@@ -430,12 +431,12 @@ fn validate_excluded_providers(fixture: &ExcludedProvidersFixture) -> Result<(),
         .iter()
         .map(|provider| provider.trim().to_ascii_lowercase())
         .collect::<BTreeSet<_>>();
-    let expected = market_data::EXCLUDED_PHASE0_SPONSOR_PROVIDERS
+    let expected = market_data::EXCLUDED_SPONSOR_PROVIDERS
         .iter()
         .map(|provider| provider.to_ascii_lowercase())
         .collect::<BTreeSet<_>>();
     if fixture.reason.trim().is_empty() || actual != expected {
-        return Err("Phase 0 sponsor exclusion fixture is incomplete".into());
+        return Err("baseline sponsor exclusion fixture is incomplete".into());
     }
     Ok(())
 }
@@ -936,10 +937,10 @@ fn print_usage() {
     println!(
         r#"Usage: cargo run -p backend -- record-market-data
 Metadata: cargo run -p backend -- record-token-metadata
-Phase 0 Slice 0.1 gate: cargo run -p backend -- phase0-slice1-gate fixtures/phase0 SPYx
-Phase 0 Slice 0.2 gate: cargo run -p backend -- phase0-slice2-gate fixtures/phase0/sponsors
-Phase 7 Slice 1 beta-evidence gate: cargo run -p backend -- phase7-slice1-gate [manifest.json]
-Phase 7 Slice 2 feature-freeze gate: cargo run -p backend -- phase7-slice2-gate [freeze.json] [beta.json]
+Market-data baseline gate: cargo run -p backend -- market-data-baseline-gate fixtures/market-data SPYx
+Sponsor readiness gate: cargo run -p backend -- sponsor-readiness-gate fixtures/market-data/sponsors
+Beta evidence gate: cargo run -p backend -- beta-evidence-gate [manifest.json]
+Release freeze gate: cargo run -p backend -- release-freeze-gate [freeze.json] [beta.json]
 Live Jupiter smoke: cargo run -p backend -- jupiter-smoke <mint[,mint...]>
 Live xStocks smoke: cargo run -p backend -- xstocks-smoke SPYx Solana
 Live private-market smoke: cargo run -p backend -- private-market-smoke

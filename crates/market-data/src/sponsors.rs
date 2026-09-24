@@ -1,4 +1,4 @@
-//! Optional sponsor-track readiness checks for Phase 0 Slice 0.2.
+//! Optional sponsor-track readiness checks for Sponsor readiness.
 //!
 //! Pyth is represented as a source-specific, cryptographically-gated evidence
 //! path. This module validates the application-level payload contract and
@@ -24,13 +24,13 @@ pub const DEFAULT_PRESTOCKS_URL: &str = "https://prestocks.com/api/prestocks";
 pub const DEFAULT_TESSERA_URL: &str = "https://rest-api.tessera.pe/v1/public/token-details";
 pub const PYTH_PRO_DEVNET_VERIFIER_PROGRAM: &str = "pytd2yyk641x7ak7mkaasSJVXh6YYZnC7wTmtgAyxPt";
 pub const PYTH_MIN_PUBLIC_EQUITY_FEEDS: usize = 10;
-pub const EXCLUDED_PHASE0_SPONSOR_PROVIDERS: [&str; 2] = ["ClawPump", "Meteora"];
+pub const EXCLUDED_SPONSOR_PROVIDERS: [&str; 2] = ["ClawPump", "Meteora"];
 
-/// Keeps explicitly excluded sponsor ecosystems out of Phase 0 public-market
+/// Keeps explicitly excluded sponsor ecosystems out of baseline public-market
 /// discovery. The comparison is case-insensitive so provider labels from
 /// external catalogs cannot bypass the policy through casing differences.
-pub fn is_excluded_phase0_sponsor_provider(provider: &str) -> bool {
-    EXCLUDED_PHASE0_SPONSOR_PROVIDERS
+pub fn is_excluded_sponsor_provider(provider: &str) -> bool {
+    EXCLUDED_SPONSOR_PROVIDERS
         .iter()
         .any(|excluded| excluded.eq_ignore_ascii_case(provider.trim()))
 }

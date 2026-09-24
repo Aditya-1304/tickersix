@@ -1,9 +1,9 @@
-//! Permanent Public Equity baseline gates for Phase 0.
+//! Permanent Public Equity baseline gates for baseline.
 //!
 //! This module owns the operational checks that must pass before provider
 //! abstraction or sponsor-specific integrations can influence rated rounds.
 //! It deliberately validates only the permanent Jupiter path; Pyth, PreStocks,
-//! and Tessera belong to the separate optional sponsor slice.
+//! and Tessera belong to the separate optional sponsor track.
 
 use serde::{Deserialize, Serialize};
 
@@ -21,7 +21,7 @@ pub const JUPITER_FREE_PLAN_LIMIT_MILLI_RPS: u64 = 1_000;
 /// The maximum number of price IDs accepted by one Jupiter Price V3 request.
 pub const JUPITER_PRICE_REQUEST_MINT_LIMIT: usize = 50;
 
-/// Phase 0's permanent baseline uses three independently operated attestors.
+/// baseline's permanent baseline uses three independently operated attestors.
 pub const JUPITER_BASELINE_ATTESTOR_COUNT: usize = 3;
 
 /// Initial bounded observation cadence from the V2.1 source specification.

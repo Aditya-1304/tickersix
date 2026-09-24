@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# This script performs a non-signing Slice 1 preflight. It builds the program,
+# This script performs a non-signing beta evidence preflight. It builds the program,
 # checks that every repository identity agrees, and optionally verifies the
 # deployed Devnet program account through public RPC.
 program_id="${TICKERSIX_PROGRAM_ID:-8sehrRxpnLbvpzgJx8MqB5YApZAh69z5yVvdK1Zeyj6Z}"

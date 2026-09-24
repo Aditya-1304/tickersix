@@ -17,7 +17,7 @@
     "recorded": false,
     "network": "devnet",
     "battle_id": "pending",
-    "evidence_path": "artifacts/phase7/jupiter.json",
+    "evidence_path": "artifacts/release-evidence/jupiter.json",
     "transaction_signature": null
   },
   "pyth_proof": {
@@ -25,14 +25,14 @@
     "recorded": false,
     "network": "devnet",
     "battle_id": "pending",
-    "evidence_path": "artifacts/phase7/pyth.json",
+    "evidence_path": "artifacts/release-evidence/pyth.json",
     "transaction_signature": null,
     "reason": "Pyth is optional; the free Jupiter path remains authoritative until a real Pyth proof is recorded."
   },
   "private_market_demo": {
     "recorded": false,
     "screenshot_paths": [
-      "artifacts/phase7/private-market.png"
+      "artifacts/release-evidence/private-market.png"
     ],
     "separate_public_ranked_domain": true,
     "public_elo_mutated": false
@@ -43,6 +43,6 @@
     "unique_players": 100,
     "round_count": 5,
     "one_active_pairing_per_player": true,
-    "evidence_path": "artifacts/phase7/league-100.json"
+    "evidence_path": "artifacts/release-evidence/league-100.json"
   }
 }

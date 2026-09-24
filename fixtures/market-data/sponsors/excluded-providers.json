@@ -1,0 +1,4 @@
+{
+  "providers": ["ClawPump", "Meteora"],
+  "reason": "Excluded from baseline public-ranked sponsor discovery; no adapter or settlement classification is created for these ecosystems."
+}

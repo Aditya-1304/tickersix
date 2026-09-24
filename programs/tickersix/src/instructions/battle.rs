@@ -472,8 +472,8 @@ pub fn handle_settle_side_score(ctx: Context<SettleSideScore>, side_index: u8) -
             ErrorCode::RoundAssetUnavailable
         );
         let data = account.try_borrow_data()?;
-        let mut slice: &[u8] = &data;
-        let round_asset = RoundAsset::try_deserialize(&mut slice)
+        let mut input_bytes: &[u8] = &data;
+        let round_asset = RoundAsset::try_deserialize(&mut input_bytes)
             .map_err(|_| error!(ErrorCode::RoundAssetUnavailable))?;
         require_keys_eq!(
             round_asset.market_round,
@@ -667,8 +667,8 @@ pub fn handle_void_battle_if_price_unavailable(
             ErrorCode::RoundAssetUnavailable
         );
         let data = account.try_borrow_data()?;
-        let mut slice: &[u8] = &data;
-        let round_asset = RoundAsset::try_deserialize(&mut slice)
+        let mut input_bytes: &[u8] = &data;
+        let round_asset = RoundAsset::try_deserialize(&mut input_bytes)
             .map_err(|_| error!(ErrorCode::RoundAssetUnavailable))?;
         require_keys_eq!(
             round_asset.market_round,

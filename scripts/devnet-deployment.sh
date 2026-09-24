@@ -11,7 +11,7 @@ fi
 wallet="${TICKERSIX_DEPLOY_WALLET:-$HOME/.config/solana/id.json}"
 rpc_url="${TICKERSIX_DEVNET_RPC_URL:-https://api.devnet.solana.com}"
 program_id="${TICKERSIX_PROGRAM_ID:-8sehrRxpnLbvpzgJx8MqB5YApZAh69z5yVvdK1Zeyj6Z}"
-artifact_dir="${TICKERSIX_DEPLOY_ARTIFACT_DIR:-artifacts/phase8/slice1}"
+artifact_dir="${TICKERSIX_DEPLOY_ARTIFACT_DIR:-artifacts/devnet-deployment}"
 
 if [[ ! -r "$wallet" ]]; then
   echo "deployment wallet is missing or unreadable: $wallet" >&2
@@ -19,7 +19,7 @@ if [[ ! -r "$wallet" ]]; then
   exit 1
 fi
 
-scripts/devnet-slice1-preflight.sh
+scripts/devnet-deployment-preflight.sh
 wallet_address="$(NO_DNA=1 solana address --keypair "$wallet")"
 balance="$(NO_DNA=1 solana balance "$wallet_address" --url "$rpc_url")"
 printf 'fee_payer=%s\n' "$wallet_address"
@@ -41,7 +41,7 @@ NO_DNA=1 anchor deploy \
 TICKERSIX_VERIFY_ONCHAIN=1 \
 TICKERSIX_DEVNET_RPC_URL="$rpc_url" \
 TICKERSIX_PROGRAM_ID="$program_id" \
-scripts/devnet-slice1-preflight.sh | tee "$artifact_dir/verification.log"
+scripts/devnet-deployment-preflight.sh | tee "$artifact_dir/verification.log"
 
 NO_DNA=1 solana program show "$program_id" \
   --url "$rpc_url" \

@@ -1,13 +1,13 @@
 # Devnet deployment foundation
 
-Slice 1 keeps localnet as the default for deterministic tests and adds an
+beta evidence keeps localnet as the default for deterministic tests and adds an
 explicit Devnet program mapping. The deployment path is guarded because it
 uses the operator's wallet to sign and submit a Devnet program deployment.
 
 ## Non-signing preflight
 
 ```bash
-scripts/devnet-slice1-preflight.sh
+scripts/devnet-deployment-preflight.sh
 ```
 
 This builds the program, checks the program ID in `Anchor.toml` and
@@ -35,9 +35,9 @@ the guarded script:
 ```bash
 TICKERSIX_DEPLOY_APPROVED=YES \\
 TICKERSIX_DEPLOY_WALLET="$HOME/.config/solana/id.json" \\
-scripts/devnet-slice1-deploy.sh
+scripts/devnet-deployment.sh
 ```
 
 The script stores deployment logs and public verification output under
-`artifacts/phase8/slice1/`. Review `program-show.json` for the upgrade
+`artifacts/devnet-deployment/`. Review `program-show.json` for the upgrade
 authority and deployed program status.

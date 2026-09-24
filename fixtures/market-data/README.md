@@ -1,4 +1,4 @@
-# Phase 0 Slice 0.1 fixtures
+# Market-data baseline fixtures
 
 These files are schema fixtures for the permanent Jupiter/xStocks baseline.
 They are intentionally not claimed as live provider evidence and must not be

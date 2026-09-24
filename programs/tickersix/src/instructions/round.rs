@@ -263,8 +263,8 @@ pub fn handle_add_round_asset(
     )?;
     for account in ctx.remaining_accounts {
         let data = account.try_borrow_data()?;
-        let mut data_slice: &[u8] = &data;
-        let existing = RoundAsset::try_deserialize(&mut data_slice)
+        let mut input_bytes: &[u8] = &data;
+        let existing = RoundAsset::try_deserialize(&mut input_bytes)
             .map_err(|_| error!(ErrorCode::DuplicateRoundAsset))?;
         require!(
             existing.scoring_mint != scoring_mint,
@@ -474,8 +474,8 @@ pub fn handle_finalize_market_round(ctx: Context<FinalizeMarketRound>) -> Result
     let mut round_is_voided = false;
     for account in ctx.remaining_accounts {
         let data = account.try_borrow_data()?;
-        let mut data_slice: &[u8] = &data;
-        let asset = RoundAsset::try_deserialize(&mut data_slice)
+        let mut input_bytes: &[u8] = &data;
+        let asset = RoundAsset::try_deserialize(&mut input_bytes)
             .map_err(|_| error!(ErrorCode::RoundAssetUnavailable))?;
         require!(
             (asset.start_finalized || asset.start_unavailable)
@@ -516,8 +516,8 @@ pub(crate) fn validate_round_assets(
     for account in accounts {
         require_keys_eq!(*account.owner, crate::id(), ErrorCode::WrongMarketRound);
         let data = account.try_borrow_data()?;
-        let mut data_slice: &[u8] = &data;
-        let asset = RoundAsset::try_deserialize(&mut data_slice)
+        let mut input_bytes: &[u8] = &data;
+        let asset = RoundAsset::try_deserialize(&mut input_bytes)
             .map_err(|_| error!(ErrorCode::WrongMarketRound))?;
         require_keys_eq!(asset.market_round, round_key, ErrorCode::WrongMarketRound);
         require!(
