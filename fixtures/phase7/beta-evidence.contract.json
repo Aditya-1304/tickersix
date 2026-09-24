@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "mode": "contract",
+  "cluster": "devnet",
+  "infrastructure": {
+    "paid_services": false,
+    "rpc_kind": "public_devnet",
+    "secrets_in_manifest": false
+  },
+  "testers": {
+    "recorded": false,
+    "count": 0,
+    "participant_ids": []
+  },
+  "battle_windows": [],
+  "jupiter_proof": {
+    "recorded": false,
+    "network": "devnet",
+    "battle_id": "pending",
+    "evidence_path": "artifacts/phase7/jupiter.json",
+    "transaction_signature": null
+  },
+  "pyth_proof": {
+    "enabled": false,
+    "recorded": false,
+    "network": "devnet",
+    "battle_id": "pending",
+    "evidence_path": "artifacts/phase7/pyth.json",
+    "transaction_signature": null,
+    "reason": "Pyth is optional; the free Jupiter path remains authoritative until a real Pyth proof is recorded."
+  },
+  "private_market_demo": {
+    "recorded": false,
+    "screenshot_paths": [
+      "artifacts/phase7/private-market.png"
+    ],
+    "separate_public_ranked_domain": true,
+    "public_elo_mutated": false
+  },
+  "league_simulation": {
+    "completed": false,
+    "player_count": 100,
+    "unique_players": 100,
+    "round_count": 5,
+    "one_active_pairing_per_player": true,
+    "evidence_path": "artifacts/phase7/league-100.json"
+  }
+}

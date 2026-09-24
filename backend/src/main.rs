@@ -38,6 +38,7 @@ pub mod leaderboard;
 pub mod league;
 pub mod live;
 pub mod metrics;
+pub mod phase7;
 pub mod private_markets;
 pub mod profile;
 pub mod proof;
@@ -190,6 +191,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Some("analyze-market-data") => analyze_market_data()?,
         Some("phase0-slice1-gate") => run_phase0_slice1_gate()?,
         Some("phase0-slice2-gate") => run_phase0_slice2_gate()?,
+        Some("phase7-slice1-gate") => run_phase7_slice1_gate()?,
         Some("jupiter-smoke") => run_jupiter_smoke().await?,
         Some("xstocks-smoke") => run_xstocks_smoke().await?,
         Some("private-market-smoke") => run_private_market_smoke().await?,
@@ -347,6 +349,33 @@ fn run_phase0_slice2_gate() -> Result<(), Box<dyn Error>> {
             private_market,
         })?
     );
+    Ok(())
+}
+
+/// Runs the Phase 7 Slice 1 beta-evidence contract gate.
+///
+/// Contract mode is intentionally accepted by this offline command so CI can
+/// validate the record shape without fabricating user sessions or Devnet
+/// transactions. An operator-supplied evidence-mode record must pass every
+/// external-evidence check before this command exits successfully.
+fn run_phase7_slice1_gate() -> Result<(), Box<dyn Error>> {
+    let manifest_path = env::args()
+        .nth(2)
+        .unwrap_or_else(|| "fixtures/phase7/beta-evidence.contract.json".to_owned());
+    let manifest: phase7::BetaEvidenceManifest =
+        serde_json::from_str(&read_to_string(manifest_path)?)?;
+    let report = phase7::validate_beta_evidence(&manifest);
+    let release_ready = report.release_ready;
+    let contract_valid = report.contract_valid;
+
+    println!("{}", serde_json::to_string_pretty(&report)?);
+
+    if !contract_valid {
+        return Err("Phase 7 beta-evidence contract is invalid".into());
+    }
+    if manifest.mode == phase7::EVIDENCE_MODE && !release_ready {
+        return Err("Phase 7 beta evidence is incomplete".into());
+    }
     Ok(())
 }
 
@@ -864,6 +893,7 @@ fn print_usage() {
 Metadata: cargo run -p backend -- record-token-metadata
 Phase 0 Slice 0.1 gate: cargo run -p backend -- phase0-slice1-gate fixtures/phase0 SPYx
 Phase 0 Slice 0.2 gate: cargo run -p backend -- phase0-slice2-gate fixtures/phase0/sponsors
+Phase 7 Slice 1 beta-evidence gate: cargo run -p backend -- phase7-slice1-gate [manifest.json]
 Live Jupiter smoke: cargo run -p backend -- jupiter-smoke <mint[,mint...]>
 Live xStocks smoke: cargo run -p backend -- xstocks-smoke SPYx Solana
 Live private-market smoke: cargo run -p backend -- private-market-smoke
