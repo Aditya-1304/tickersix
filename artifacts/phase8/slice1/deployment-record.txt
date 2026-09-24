@@ -1,0 +1,8 @@
+cluster=devnet
+program_id=8sehrRxpnLbvpzgJx8MqB5YApZAh69z5yVvdK1Zeyj6Z
+fee_payer=EzypEEahLzruR91M7MbueAChnJMqwNef3f6dUQs1V91H
+rpc_url=https://api.devnet.solana.com
+idl_status=exact_sha256_match
+metadata_account=GRa85o3VrDa6Eq12guJJMcNsbaAr4fwejxjSfGW4MmXX
+buffer_account=FUMrB93hZXiZJaNDeyqhT8JsMQoCkEBo3JxUpynVxD31
+buffer_status=closed

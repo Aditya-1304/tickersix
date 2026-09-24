@@ -1,0 +1,2 @@
+9b0e95fcbd01c5f309f0f98f01c437c9d25cf7a0773701336e1e275c17022e65  target/idl/tickersix.json
+9b0e95fcbd01c5f309f0f98f01c437c9d25cf7a0773701336e1e275c17022e65  /tmp/tickersix-devnet-idl-final.hex

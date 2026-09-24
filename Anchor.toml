@@ -6,7 +6,13 @@ skip_local_validator = true
 resolution = true
 skip-lint = false
 
+# Localnet remains the default for deterministic local tests.
 [programs.localnet]
+tickersix = "8sehrRxpnLbvpzgJx8MqB5YApZAh69z5yVvdK1Zeyj6Z"
+
+# Devnet uses the same fixed program identity; deployment still requires an
+# explicit --provider.cluster devnet command and the user-controlled wallet.
+[programs.devnet]
 tickersix = "8sehrRxpnLbvpzgJx8MqB5YApZAh69z5yVvdK1Zeyj6Z"
 
 [provider]

@@ -1,0 +1,18 @@
+Warning: 'anchor deploy' is deprecated. Use 'anchor program deploy' instead.
+Deploying cluster: https://api.devnet.solana.com
+Upgrade authority: /home/aditya/.config/solana/id.json
+Deploying program "tickersix"...
+Program path: /home/aditya/Projects/tickersix/target/deploy/tickersix.so...
+Program ID: 8sehrRxpnLbvpzgJx8MqB5YApZAh69z5yVvdK1Zeyj6Z
+npm notice run npx
+npm notice run 'program-metadata' --rpc https://api.devnet.solana.com --keypair /home/aditya/.config/solana/id.json write idl 8sehrRxpnLbvpzgJx8MqB5YApZAh69z5yVvdK1Zeyj6Z /home/aditya/Projects/tickersix/target/idl/tickersix.json
+
+Writing metadata account...
+ ├─ metadata: GRa85o3VrDa6Eq12guJJMcNsbaAr4fwejxjSfGW4MmXX
+ ├─ program: 8sehrRxpnLbvpzgJx8MqB5YApZAh69z5yVvdK1Zeyj6Z
+ └─ seed: idl
+
+(node:727233) ExperimentalWarning: WebSocket over HTTP2 is experimental, and subject to change.
+(Use `node --trace-warnings ...` to show where the warning was created)
+[Error] The provided transaction plan failed to execute. See the `transactionPlanResult` attribute for more details. Note that the `cause` property is deprecated, and a future version will not set it.
+Error: Failed to initialize IDL

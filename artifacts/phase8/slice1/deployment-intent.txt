@@ -1,0 +1,4 @@
+cluster=devnet
+program_id=8sehrRxpnLbvpzgJx8MqB5YApZAh69z5yVvdK1Zeyj6Z
+fee_payer=EzypEEahLzruR91M7MbueAChnJMqwNef3f6dUQs1V91H
+rpc_url=https://api.devnet.solana.com
