@@ -19,3 +19,19 @@ The command exits successfully for the checked-in contract fixture. An
 windows, 8-20 distinct testers, a Jupiter Devnet proof transaction, the
 conditional Pyth proof when enabled, Private Market screenshots, and a
 completed 100-player League report.
+
+## Feature freeze
+
+`feature-freeze.contract.json` pins the exact V2.1 P0/P1 scope, the 2026-09-24
+23:59 IST freeze, the allowed Pyth/PreStocks/Tessera sponsor tracks, and the
+no-new-sponsor-scope rule. Its `contract` mode is intentionally not release
+ready. Change it to `freeze` only in an operator-owned record after Slice 1
+evidence is real and every required status is verified.
+
+Run the offline Slice 2 contract gate with:
+
+```bash
+cargo run -p backend -- phase7-slice2-gate \
+  fixtures/phase7/feature-freeze.contract.json \
+  fixtures/phase7/beta-evidence.contract.json
+```

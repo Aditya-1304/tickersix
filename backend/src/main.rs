@@ -157,6 +157,13 @@ struct PrivateMarketSmokeReport {
 }
 
 #[derive(Debug, Serialize)]
+struct Phase7Slice2Report {
+    slice: &'static str,
+    beta: phase7::BetaEvidenceReport,
+    freeze: phase7::FeatureFreezeReport,
+}
+
+#[derive(Debug, Serialize)]
 struct PythSmokeReport {
     api_key_configured: bool,
     expected_feed_id: u32,
@@ -192,6 +199,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Some("phase0-slice1-gate") => run_phase0_slice1_gate()?,
         Some("phase0-slice2-gate") => run_phase0_slice2_gate()?,
         Some("phase7-slice1-gate") => run_phase7_slice1_gate()?,
+        Some("phase7-slice2-gate") => run_phase7_slice2_gate()?,
         Some("jupiter-smoke") => run_jupiter_smoke().await?,
         Some("xstocks-smoke") => run_xstocks_smoke().await?,
         Some("private-market-smoke") => run_private_market_smoke().await?,
@@ -375,6 +383,43 @@ fn run_phase7_slice1_gate() -> Result<(), Box<dyn Error>> {
     }
     if manifest.mode == phase7::EVIDENCE_MODE && !release_ready {
         return Err("Phase 7 beta evidence is incomplete".into());
+    }
+    Ok(())
+}
+
+/// Runs the Phase 7 Slice 2 feature-freeze gate against a freeze record and
+/// the Slice 1 beta record it consumes. Contract mode remains available for
+/// offline CI; freeze mode exits successfully only after all P0/P1 and beta
+/// evidence checks are green.
+fn run_phase7_slice2_gate() -> Result<(), Box<dyn Error>> {
+    let freeze_path = env::args()
+        .nth(2)
+        .unwrap_or_else(|| "fixtures/phase7/feature-freeze.contract.json".to_owned());
+    let freeze: phase7::FeatureFreezeManifest =
+        serde_json::from_str(&read_to_string(&freeze_path)?)?;
+    let beta_path = env::args()
+        .nth(3)
+        .unwrap_or_else(|| freeze.beta_manifest_path.clone());
+    let beta: phase7::BetaEvidenceManifest = serde_json::from_str(&read_to_string(beta_path)?)?;
+    let beta_report = phase7::validate_beta_evidence(&beta);
+    let freeze_report = phase7::validate_feature_freeze(&freeze, &beta_report);
+    let contract_valid = freeze_report.contract_valid;
+    let release_ready = freeze_report.release_ready;
+
+    println!(
+        "{}",
+        serde_json::to_string_pretty(&Phase7Slice2Report {
+            slice: "phase7.2",
+            beta: beta_report,
+            freeze: freeze_report,
+        })?
+    );
+
+    if !contract_valid {
+        return Err("Phase 7 feature-freeze contract is invalid".into());
+    }
+    if freeze.mode == phase7::FREEZE_MODE && !release_ready {
+        return Err("Phase 7 feature freeze is incomplete".into());
     }
     Ok(())
 }
@@ -894,6 +939,7 @@ Metadata: cargo run -p backend -- record-token-metadata
 Phase 0 Slice 0.1 gate: cargo run -p backend -- phase0-slice1-gate fixtures/phase0 SPYx
 Phase 0 Slice 0.2 gate: cargo run -p backend -- phase0-slice2-gate fixtures/phase0/sponsors
 Phase 7 Slice 1 beta-evidence gate: cargo run -p backend -- phase7-slice1-gate [manifest.json]
+Phase 7 Slice 2 feature-freeze gate: cargo run -p backend -- phase7-slice2-gate [freeze.json] [beta.json]
 Live Jupiter smoke: cargo run -p backend -- jupiter-smoke <mint[,mint...]>
 Live xStocks smoke: cargo run -p backend -- xstocks-smoke SPYx Solana
 Live private-market smoke: cargo run -p backend -- private-market-smoke

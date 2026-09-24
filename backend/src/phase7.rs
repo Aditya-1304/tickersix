@@ -419,6 +419,292 @@ fn record_check(
     });
 }
 
+pub const FEATURE_FREEZE_SCHEMA_VERSION: u16 = 1;
+pub const EXPECTED_FEATURE_FREEZE_AT: &str = "2026-09-24T23:59:00+05:30";
+pub const FREEZE_MODE: &str = "freeze";
+pub const GREEN_STATUS: &str = "green";
+pub const DISABLED_STATUS: &str = "disabled";
+pub const PLANNED_STATUS: &str = "planned";
+pub const ALLOWED_SPONSOR_TRACKS: &[&str] = &[PYTH_SOURCE_KIND, "PRESTOCKS", "TESSERA"];
+pub const P0_SCOPE: &[&str] = &[
+    "wallet_authentication",
+    "reference_asset_registry",
+    "dynamic_public_equity_universe",
+    "market_round",
+    "battle",
+    "six_picks",
+    "captain",
+    "immutable_commit_reveal",
+    "jupiter_settlement",
+    "q9_score_winner",
+    "ranked_queue",
+    "public_rating_update",
+    "public_leaderboard",
+    "official_league_swiss",
+    "live_projected_score",
+    "source_aware_proof",
+    "mobile_usable_ui",
+    "replay_demo",
+    "zero_cost_devnet",
+];
+pub const P1_SCOPE: &[&str] = &[
+    "pyth_verified_optional",
+    "pyth_proof_panel",
+    "prestocks_adapter",
+    "tessera_representation_cards",
+    "private_markets_ui",
+    "commit_reveal_recovery",
+    "achievements_titles",
+    "observability_proof_assets",
+];
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct FeatureFreezeManifest {
+    pub schema_version: u16,
+    pub mode: String,
+    pub roadmap: String,
+    pub cluster: String,
+    pub freeze_at: String,
+    pub no_new_sponsor_scope: bool,
+    pub sponsor_tracks: Vec<String>,
+    pub pyth_enabled: bool,
+    pub beta_manifest_path: String,
+    pub p0: Vec<FreezeItem>,
+    pub p1: Vec<FreezeItem>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct FreezeItem {
+    pub id: String,
+    pub status: String,
+    pub evidence_path: String,
+    pub note: String,
+}
+
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub struct FeatureFreezeReport {
+    pub slice: &'static str,
+    pub mode: String,
+    pub contract_valid: bool,
+    pub release_ready: bool,
+    pub checks: Vec<EvidenceCheck>,
+}
+
+/// Validates the Phase 7 feature-freeze record against the documented P0/P1
+/// scope and the Slice 1 beta report.
+///
+/// The contract fixture is suitable for local CI and remains deliberately
+/// non-ready. A freeze-mode record can become release-ready only when every P0
+/// item is green, every non-disabled P1 item is green, the optional Pyth state
+/// is internally consistent, and Slice 1 has real evidence-mode readiness.
+pub fn validate_feature_freeze(
+    manifest: &FeatureFreezeManifest,
+    beta_report: &BetaEvidenceReport,
+) -> FeatureFreezeReport {
+    let mut checks = Vec::new();
+    let mut contract_valid = true;
+    let mut external_evidence_valid = true;
+    let known_mode = matches!(manifest.mode.as_str(), CONTRACT_MODE | FREEZE_MODE);
+
+    record_check(
+        &mut checks,
+        &mut contract_valid,
+        &mut external_evidence_valid,
+        CheckKind::Contract,
+        "freeze_schema_version",
+        manifest.schema_version == FEATURE_FREEZE_SCHEMA_VERSION,
+        format!(
+            "expected schema {}, found {}",
+            FEATURE_FREEZE_SCHEMA_VERSION, manifest.schema_version
+        ),
+    );
+    record_check(
+        &mut checks,
+        &mut contract_valid,
+        &mut external_evidence_valid,
+        CheckKind::Contract,
+        "freeze_mode",
+        known_mode,
+        "mode must be contract or freeze".to_owned(),
+    );
+    record_check(
+        &mut checks,
+        &mut contract_valid,
+        &mut external_evidence_valid,
+        CheckKind::Contract,
+        "freeze_source",
+        manifest.roadmap == "STOCKLANA_V2.1" && manifest.cluster == DEVNET_CLUSTER,
+        "the freeze must bind STOCKLANA_V2.1 and Solana Devnet".to_owned(),
+    );
+    record_check(
+        &mut checks,
+        &mut contract_valid,
+        &mut external_evidence_valid,
+        CheckKind::Contract,
+        "freeze_deadline",
+        manifest.freeze_at == EXPECTED_FEATURE_FREEZE_AT,
+        format!("feature freeze must be {}", EXPECTED_FEATURE_FREEZE_AT),
+    );
+    record_check(
+        &mut checks,
+        &mut contract_valid,
+        &mut external_evidence_valid,
+        CheckKind::Contract,
+        "no_new_sponsor_scope",
+        manifest.no_new_sponsor_scope,
+        "new sponsor scope is forbidden after the Phase 7 freeze".to_owned(),
+    );
+
+    let sponsor_tracks = manifest
+        .sponsor_tracks
+        .iter()
+        .map(|track| track.trim())
+        .collect::<BTreeSet<_>>();
+    let sponsor_scope_valid = !sponsor_tracks.is_empty()
+        && sponsor_tracks.len() == manifest.sponsor_tracks.len()
+        && sponsor_tracks
+            .iter()
+            .all(|track| ALLOWED_SPONSOR_TRACKS.contains(track));
+    record_check(
+        &mut checks,
+        &mut contract_valid,
+        &mut external_evidence_valid,
+        CheckKind::Contract,
+        "sponsor_scope",
+        sponsor_scope_valid,
+        "only the documented Pyth, PreStocks, and Tessera tracks may be frozen".to_owned(),
+    );
+    record_check(
+        &mut checks,
+        &mut contract_valid,
+        &mut external_evidence_valid,
+        CheckKind::Contract,
+        "beta_manifest_path",
+        valid_phase7_path(&manifest.beta_manifest_path),
+        "the freeze must point to a scoped Phase 7 beta manifest".to_owned(),
+    );
+
+    let p0_shape_valid = scope_items_have_exact_ids(&manifest.p0, P0_SCOPE)
+        && scope_items_have_valid_paths(&manifest.p0);
+    record_check(
+        &mut checks,
+        &mut contract_valid,
+        &mut external_evidence_valid,
+        CheckKind::Contract,
+        "p0_scope_shape",
+        p0_shape_valid,
+        "P0 must contain each documented submission-blocking item exactly once".to_owned(),
+    );
+    let p1_shape_valid = scope_items_have_exact_ids(&manifest.p1, P1_SCOPE)
+        && scope_items_have_valid_paths(&manifest.p1);
+    record_check(
+        &mut checks,
+        &mut contract_valid,
+        &mut external_evidence_valid,
+        CheckKind::Contract,
+        "p1_scope_shape",
+        p1_shape_valid,
+        "P1 must contain each documented sponsor-strengthening item exactly once".to_owned(),
+    );
+    let p0_status_valid = manifest.p0.iter().all(|item| item.status == GREEN_STATUS);
+    record_check(
+        &mut checks,
+        &mut contract_valid,
+        &mut external_evidence_valid,
+        CheckKind::ExternalEvidence,
+        "p0_status",
+        manifest.mode == CONTRACT_MODE || p0_status_valid,
+        "every P0 item must be green before release freeze".to_owned(),
+    );
+    let p1_status_valid = manifest.p1.iter().all(|item| {
+        item.status == GREEN_STATUS
+            || (!manifest.pyth_enabled
+                && matches!(
+                    item.id.as_str(),
+                    "pyth_verified_optional" | "pyth_proof_panel"
+                )
+                && item.status == DISABLED_STATUS)
+    });
+    record_check(
+        &mut checks,
+        &mut contract_valid,
+        &mut external_evidence_valid,
+        CheckKind::ExternalEvidence,
+        "p1_status",
+        manifest.mode == CONTRACT_MODE || p1_status_valid,
+        "P1 items must be green, with only disabled optional Pyth items allowed when Pyth is off"
+            .to_owned(),
+    );
+
+    let beta_compatible = if manifest.mode == CONTRACT_MODE {
+        beta_report.mode == CONTRACT_MODE && beta_report.contract_valid
+    } else {
+        beta_report.mode == EVIDENCE_MODE && beta_report.release_ready
+    };
+    record_check(
+        &mut checks,
+        &mut contract_valid,
+        &mut external_evidence_valid,
+        CheckKind::ExternalEvidence,
+        "beta_evidence_compatibility",
+        beta_compatible,
+        "the freeze must consume a matching Slice 1 beta report".to_owned(),
+    );
+
+    let release_ready = manifest.mode == FREEZE_MODE
+        && contract_valid
+        && external_evidence_valid
+        && checks.iter().all(|check| check.passed);
+    record_check(
+        &mut checks,
+        &mut contract_valid,
+        &mut external_evidence_valid,
+        CheckKind::ExternalEvidence,
+        "feature_freeze_evidence",
+        release_ready,
+        if release_ready {
+            "P0/P1 scope and beta evidence are ready for feature freeze".to_owned()
+        } else {
+            "contract mode validates scope only; it does not claim release readiness".to_owned()
+        },
+    );
+
+    FeatureFreezeReport {
+        slice: "phase7.2",
+        mode: manifest.mode.clone(),
+        contract_valid,
+        release_ready,
+        checks,
+    }
+}
+
+fn scope_items_have_exact_ids(items: &[FreezeItem], expected: &[&str]) -> bool {
+    let actual = items
+        .iter()
+        .map(|item| item.id.trim())
+        .collect::<BTreeSet<_>>();
+    let expected = expected.iter().copied().collect::<BTreeSet<_>>();
+    actual == expected && items.len() == expected.len()
+}
+
+fn scope_items_have_valid_paths(items: &[FreezeItem]) -> bool {
+    items.iter().all(|item| {
+        !item.id.trim().is_empty()
+            && !item.note.trim().is_empty()
+            && valid_artifact_path(&item.evidence_path)
+    })
+}
+
+fn valid_phase7_path(value: &str) -> bool {
+    let path = Path::new(value);
+    !value.trim().is_empty()
+        && (value.starts_with("artifacts/phase7/") || value.starts_with("fixtures/phase7/"))
+        && !path.is_absolute()
+        && path
+            .components()
+            .all(|component| matches!(component, Component::Normal(_)))
+}
+
 fn valid_artifact_path(value: &str) -> bool {
     let path = Path::new(value);
     !value.trim().is_empty()
@@ -558,5 +844,81 @@ mod tests {
             .checks
             .iter()
             .any(|check| check.name == "battle_window_shape" && !check.passed));
+    }
+
+    fn freeze_manifest(mode: &str) -> FeatureFreezeManifest {
+        let release = mode == FREEZE_MODE;
+        let item = |id: &str| FreezeItem {
+            id: id.to_owned(),
+            status: if release {
+                GREEN_STATUS
+            } else {
+                PLANNED_STATUS
+            }
+            .to_owned(),
+            evidence_path: format!("artifacts/phase7/freeze/{id}.json"),
+            note: "Tracked by the Phase 7 release record.".to_owned(),
+        };
+        FeatureFreezeManifest {
+            schema_version: FEATURE_FREEZE_SCHEMA_VERSION,
+            mode: mode.to_owned(),
+            roadmap: "STOCKLANA_V2.1".to_owned(),
+            cluster: DEVNET_CLUSTER.to_owned(),
+            freeze_at: EXPECTED_FEATURE_FREEZE_AT.to_owned(),
+            no_new_sponsor_scope: true,
+            sponsor_tracks: ALLOWED_SPONSOR_TRACKS
+                .iter()
+                .map(|track| (*track).to_owned())
+                .collect(),
+            pyth_enabled: false,
+            beta_manifest_path: "fixtures/phase7/beta-evidence.contract.json".to_owned(),
+            p0: P0_SCOPE.iter().map(|id| item(id)).collect(),
+            p1: P1_SCOPE.iter().map(|id| item(id)).collect(),
+        }
+    }
+
+    #[test]
+    fn feature_freeze_contract_accepts_the_documented_scope_without_claiming_readiness() {
+        let freeze = freeze_manifest("contract");
+        let beta_report = validate_beta_evidence(&manifest(CONTRACT_MODE));
+
+        let report = validate_feature_freeze(&freeze, &beta_report);
+
+        assert!(report.contract_valid);
+        assert!(!report.release_ready);
+        assert!(report
+            .checks
+            .iter()
+            .any(|check| check.name == "feature_freeze_evidence" && !check.passed));
+    }
+
+    #[test]
+    fn feature_freeze_rejects_a_non_green_p0_even_with_ready_beta_evidence() {
+        let mut freeze = freeze_manifest(FREEZE_MODE);
+        let beta_report = validate_beta_evidence(&manifest(EVIDENCE_MODE));
+        freeze.p0[0].status = PLANNED_STATUS.to_owned();
+
+        let report = validate_feature_freeze(&freeze, &beta_report);
+
+        assert!(!report.release_ready);
+        assert!(report
+            .checks
+            .iter()
+            .any(|check| check.name == "p0_status" && !check.passed));
+    }
+
+    #[test]
+    fn feature_freeze_rejects_an_unapproved_sponsor_track() {
+        let mut freeze = freeze_manifest(CONTRACT_MODE);
+        let beta_report = validate_beta_evidence(&manifest(CONTRACT_MODE));
+        freeze.sponsor_tracks.push("CLAWPUMP".to_owned());
+
+        let report = validate_feature_freeze(&freeze, &beta_report);
+
+        assert!(!report.contract_valid);
+        assert!(report
+            .checks
+            .iter()
+            .any(|check| check.name == "sponsor_scope" && !check.passed));
     }
 }
