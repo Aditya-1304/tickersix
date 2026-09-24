@@ -21,6 +21,7 @@ use sqlx::{postgres::PgPoolOptions, PgPool};
 use tokio::net::TcpListener;
 
 use crate::{
+    achievements::{self, AchievementError},
     auth::{self, AuthError},
     db,
     leaderboard::{self, LeaderboardError},
@@ -71,6 +72,10 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/auth/logout", post(logout))
         .route("/v1/profiles/:wallet", get(get_profile))
         .route("/v1/profiles/:wallet/history", get(get_profile_history))
+        .route(
+            "/v1/profiles/:wallet/achievements",
+            get(get_profile_achievements),
+        )
         .route("/v1/profile/me", put(update_my_profile))
         .route("/v1/market-rounds/next", get(get_next_market_round))
         .route(
@@ -155,6 +160,7 @@ struct ErrorBody {
 #[derive(Debug)]
 pub enum ApiError {
     Auth(AuthError),
+    Achievements(AchievementError),
     Leaderboard(LeaderboardError),
     League(LeagueError),
     Live(LiveError),
@@ -170,6 +176,7 @@ impl fmt::Display for ApiError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Auth(error) => write!(formatter, "{error}"),
+            Self::Achievements(error) => write!(formatter, "{error}"),
             Self::Leaderboard(error) => write!(formatter, "{error}"),
             Self::League(error) => write!(formatter, "{error}"),
             Self::Live(error) => write!(formatter, "{error}"),
@@ -196,6 +203,7 @@ impl IntoResponse for ApiError {
             | Self::Auth(AuthError::DomainMismatch)
             | Self::Auth(AuthError::SessionExpired)
             | Self::DomainMismatch => StatusCode::UNAUTHORIZED,
+            Self::Achievements(AchievementError::InvalidWallet) => StatusCode::BAD_REQUEST,
             Self::Profile(ProfileError::InvalidWallet)
             | Self::Profile(ProfileError::InvalidDisplayName)
             | Self::Profile(ProfileError::InvalidAvatarUrl) => StatusCode::BAD_REQUEST,
@@ -271,6 +279,9 @@ impl IntoResponse for ApiError {
             Self::Auth(AuthError::Storage(_)) | Self::Profile(ProfileError::Storage(_)) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
+            Self::Achievements(AchievementError::Storage(_) | AchievementError::League(_)) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
             Self::Leaderboard(LeaderboardError::Storage(_)) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::League(LeagueError::InvalidStandings | LeagueError::Storage(_)) => {
                 StatusCode::INTERNAL_SERVER_ERROR
@@ -291,6 +302,12 @@ impl IntoResponse for ApiError {
 impl From<AuthError> for ApiError {
     fn from(error: AuthError) -> Self {
         Self::Auth(error)
+    }
+}
+
+impl From<AchievementError> for ApiError {
+    fn from(error: AchievementError) -> Self {
+        Self::Achievements(error)
     }
 }
 
@@ -469,6 +486,15 @@ async fn get_profile_history(
     Path(wallet): Path<String>,
 ) -> Result<Json<Vec<profile::RatingHistoryRow>>, ApiError> {
     Ok(Json(profile::get_history(&state.pool, &wallet).await?))
+}
+
+async fn get_profile_achievements(
+    State(state): State<ApiState>,
+    Path(wallet): Path<String>,
+) -> Result<Json<Vec<achievements::AchievementView>>, ApiError> {
+    Ok(Json(
+        achievements::list_for_wallet(&state.pool, &wallet).await?,
+    ))
 }
 
 async fn update_my_profile(
@@ -718,6 +744,7 @@ fn session_from_headers(headers: &HeaderMap) -> Option<&str> {
 fn error_code(error: &ApiError) -> &'static str {
     match error {
         ApiError::Auth(AuthError::InvalidWallet)
+        | ApiError::Achievements(AchievementError::InvalidWallet)
         | ApiError::Profile(ProfileError::InvalidWallet) => "INVALID_WALLET",
         ApiError::Auth(AuthError::InvalidSignature) => "INVALID_SIGNATURE",
         ApiError::Auth(AuthError::InvalidChallenge) => "INVALID_CHALLENGE",
@@ -729,6 +756,9 @@ fn error_code(error: &ApiError) -> &'static str {
         ApiError::Profile(ProfileError::InvalidAvatarUrl) => "INVALID_AVATAR_URL",
         ApiError::Profile(ProfileError::NotFound) => "PROFILE_NOT_FOUND",
         ApiError::Auth(AuthError::Storage(_)) | ApiError::Profile(ProfileError::Storage(_)) => {
+            "INTERNAL_ERROR"
+        }
+        ApiError::Achievements(AchievementError::Storage(_) | AchievementError::League(_)) => {
             "INTERNAL_ERROR"
         }
         ApiError::Leaderboard(LeaderboardError::Storage(_)) => "INTERNAL_ERROR",

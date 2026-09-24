@@ -25,6 +25,7 @@ use market_data::{
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPoolOptions;
 
+pub mod achievements;
 pub mod api;
 pub mod attestor;
 pub mod auth;
