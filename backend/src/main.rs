@@ -30,6 +30,7 @@ pub mod api;
 pub mod attestor;
 pub mod auth;
 pub mod db;
+pub mod hardening;
 pub mod indexer;
 pub mod jobs;
 pub mod leaderboard;

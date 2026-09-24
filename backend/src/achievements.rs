@@ -74,21 +74,11 @@ pub enum BattleOutcome {
     Ineligible,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AchievementState {
     pub win_streak: u32,
     pub fully_played_rated_battles: u32,
     pub fully_played_rated_wins: u32,
-}
-
-impl Default for AchievementState {
-    fn default() -> Self {
-        Self {
-            win_streak: 0,
-            fully_played_rated_battles: 0,
-            fully_played_rated_wins: 0,
-        }
-    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

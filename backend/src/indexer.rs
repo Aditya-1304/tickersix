@@ -313,6 +313,28 @@ pub async fn upsert_battle(pool: &PgPool, battle: &IndexedBattle) -> Result<(), 
         .await
         .map_err(|error| IndexerError::Storage(error.to_string()))?;
     }
+    if battle.state == "VOIDED" {
+        let event_key = format!("battle-void:{}:{}", battle.chain_pubkey, battle.indexed_at);
+        crate::hardening::record_incident(
+            pool,
+            crate::hardening::IncidentInput {
+                event_key: &event_key,
+                class: crate::hardening::FailureClass::SystemVoid,
+                competition_domain: None,
+                market_round_id: Some(battle.market_round_id),
+                battle_pubkey: Some(&battle.chain_pubkey),
+                settlement_source_kind: battle.settlement_source_kind.as_deref(),
+                evidence: serde_json::json!({
+                    "result": battle.result,
+                    "state": battle.state,
+                    "indexed_at": battle.indexed_at,
+                }),
+                occurred_at: battle.indexed_at,
+            },
+        )
+        .await
+        .map_err(|error| IndexerError::Storage(error.to_string()))?;
+    }
     Ok(())
 }
 

@@ -10,7 +10,7 @@ use std::{error::Error, fmt};
 use serde::Serialize;
 use sqlx::{PgPool, Row};
 
-use crate::{league, metrics, ranked, rating};
+use crate::{achievements, league, metrics, ranked, rating};
 
 const MAX_DUE_RANKED_ROUNDS: i64 = 32;
 const MAX_RATING_APPLIES_PER_TICK: usize = 64;
@@ -20,6 +20,8 @@ pub struct SchedulerTick {
     pub expired_memberships: u64,
     pub matched_rounds: Vec<i64>,
     pub rating_batches_applied: usize,
+    pub rating_reconciliation_mismatches: u64,
+    pub achievements_reconciled: usize,
 }
 
 #[derive(Debug)]
@@ -27,6 +29,7 @@ pub enum JobError {
     League(league::LeagueError),
     Ranked(ranked::RankedError),
     Rating(rating::RatingError),
+    Achievements(achievements::AchievementError),
     Storage(String),
 }
 
@@ -36,6 +39,7 @@ impl fmt::Display for JobError {
             Self::League(error) => write!(formatter, "League job failed: {error}"),
             Self::Ranked(error) => write!(formatter, "Ranked job failed: {error}"),
             Self::Rating(error) => write!(formatter, "rating job failed: {error}"),
+            Self::Achievements(error) => write!(formatter, "achievement job failed: {error}"),
             Self::Storage(error) => write!(formatter, "scheduler storage query failed: {error}"),
         }
     }
@@ -61,12 +65,19 @@ impl From<rating::RatingError> for JobError {
     }
 }
 
+impl From<achievements::AchievementError> for JobError {
+    fn from(error: achievements::AchievementError) -> Self {
+        Self::Achievements(error)
+    }
+}
+
 /// Executes one bounded scheduler tick.
 ///
 /// League pairing itself still requires finalized chain entropy and is invoked
 /// by the chain-aware coordinator path. This tick handles the safe local
 /// lifecycle work: expiring stale membership intents, running due Ranked
-/// matchmakers, and applying ready rating events in round order.
+/// matchmakers, applying ready rating events, checking projection drift, and
+/// materializing cosmetic achievements in round order.
 pub async fn run_once(pool: &PgPool, now: i64) -> Result<SchedulerTick, JobError> {
     let expired_memberships = league::expire_pending_memberships(pool, now).await?;
     let due_rounds = due_ranked_rounds(pool, now).await?;
@@ -84,11 +95,22 @@ pub async fn run_once(pool: &PgPool, now: i64) -> Result<SchedulerTick, JobError
         rating_batches_applied += 1;
     }
 
+    let rating_reconciliation_mismatches = rating::reconcile_projection(pool).await?;
+    let achievements_reconciled = match achievements::reconcile_all(pool, now).await {
+        Ok(created) => created,
+        Err(error) => {
+            metrics::increment("achievement_reconciliation_failures_total", 1);
+            return Err(error.into());
+        }
+    };
+
     metrics::increment("scheduler_ticks_total", 1);
     Ok(SchedulerTick {
         expired_memberships,
         matched_rounds,
         rating_batches_applied,
+        rating_reconciliation_mismatches,
+        achievements_reconciled,
     })
 }
 

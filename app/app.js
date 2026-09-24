@@ -4,7 +4,7 @@
  * The UI intentionally keeps network reads and local demo data behind the same
  * view model. That lets the hackathon demo run without a paid RPC, while a
  * deployed backend can provide the real round, proof, replay, and SSE data.
- * This client never signs, sends, settles, rates, or awards achievements.
+ * This client never signs, sends, settles, rates, or mutates achievements.
  */
 
 const API_BASE = window.TICKERSIX_API_BASE || "";
@@ -261,6 +261,49 @@ const DEMO_PRIVATE_DETAILS = {
   },
 };
 
+const DEMO_PROFILE = {
+  wallet: "DemoWallet111111111111111111111111111111",
+  display_name: "Aditya",
+  season_id: 1,
+  rating: 1601,
+  rated_games: 7,
+  peak_rating: 1620,
+  wins: 5,
+  draws: 0,
+  losses: 2,
+  placement_complete: true,
+};
+
+const DEMO_ACHIEVEMENTS = [
+  {
+    code: "FIRST_BLOOD",
+    name: "First Blood",
+    rarity: "COMMON",
+    scope_type: "BATTLE",
+    scope_id: DEMO_BATTLE,
+    unlocked_at: 0,
+    evidence: { rule: "first_fully_played_rated_win" },
+  },
+  {
+    code: "PHOTO_FINISH",
+    name: "Photo Finish",
+    rarity: "UNCOMMON",
+    scope_type: "BATTLE",
+    scope_id: DEMO_BATTLE,
+    unlocked_at: 0,
+    evidence: { rule: "winning_margin_between_1_and_10_bps" },
+  },
+  {
+    code: "GREEN_SIX",
+    name: "Green Six",
+    rarity: "RARE",
+    scope_type: "BATTLE",
+    scope_id: DEMO_BATTLE,
+    unlocked_at: 0,
+    evidence: { rule: "all_six_asset_returns_positive" },
+  },
+];
+
 const state = {
   view: "home",
   round: DEMO_ROUND,
@@ -282,6 +325,10 @@ const state = {
   privateMarketsLoading: false,
   privateAssetDetail: null,
   privateComparison: null,
+  profile: DEMO_PROFILE,
+  achievements: DEMO_ACHIEVEMENTS,
+  profileError: null,
+  profileLoading: false,
 };
 
 const app = document.querySelector("#app");
@@ -375,6 +422,33 @@ async function loadPrivateMarkets() {
     state.privateMarketsError = error.message || "PRIVATE_MARKETS_UNAVAILABLE";
   } finally {
     state.privateMarketsLoading = false;
+    render();
+  }
+}
+
+async function loadProfile() {
+  state.profileLoading = true;
+  state.profileError = null;
+  render();
+  if (!state.wallet) {
+    state.profile = DEMO_PROFILE;
+    state.achievements = DEMO_ACHIEVEMENTS;
+    state.profileLoading = false;
+    render();
+    return;
+  }
+  try {
+    state.profile = await api(`/v1/profiles/${encodeURIComponent(state.wallet)}`);
+    state.achievements = await api(
+      `/v1/profiles/${encodeURIComponent(state.wallet)}/achievements`,
+    );
+    state.backendOnline = true;
+  } catch (error) {
+    state.profile = DEMO_PROFILE;
+    state.achievements = DEMO_ACHIEVEMENTS;
+    state.profileError = error.message || "PROFILE_UNAVAILABLE";
+  } finally {
+    state.profileLoading = false;
     render();
   }
 }
@@ -699,8 +773,39 @@ function renderPrivate() {
     <div class="proof-actions"><button class="button secondary" data-action="home">BACK TO PUBLIC RANKED</button></div>`;
 }
 
+function renderProfile() {
+  const profile = state.profile || DEMO_PROFILE;
+  const achievements = state.achievements || [];
+  const errorNotice = state.profileError
+    ? `<div class="alert"><strong>READ-ONLY FALLBACK:</strong> The authenticated profile is unavailable (${escapeHtml(state.profileError)}). Showing demo progress only.</div>`
+    : "";
+  return `
+    <section class="hero">
+      <p class="eyebrow">Public Equity · Cosmetic progress</p>
+      <h1>Your progress.</h1>
+      <p class="lede">Achievements are derived from finalized, official Battle and League history. They have no economic value and never change Elo.</p>
+    </section>
+    ${errorNotice}
+    <section class="grid three">
+      <article class="card stat-card"><span class="stat-label">Rating</span><span class="stat-value">${escapeHtml(profile.rating)}</span><span class="stat-subvalue">Peak ${escapeHtml(profile.peak_rating)} · ${escapeHtml(profile.rated_games)} rated Battles</span></article>
+      <article class="card stat-card"><span class="stat-label">Record</span><span class="stat-value">${escapeHtml(profile.wins)}–${escapeHtml(profile.losses)}</span><span class="stat-subvalue">${escapeHtml(profile.draws)} draws · Season ${escapeHtml(profile.season_id || "—")}</span></article>
+      <article class="card stat-card"><span class="stat-label">Unlocked</span><span class="stat-value">${achievements.length}</span><span class="stat-subvalue">Cosmetic titles only</span></article>
+    </section>
+    <div class="section-heading"><h2>Achievements</h2><span class="muted">Evidence retained by the backend</span></div>
+    ${state.profileLoading ? `<div class="empty-state">Refreshing profile history…</div>` : achievements.length ? `<section class="achievement-grid">${achievements.map((achievement) => `
+      <article class="card achievement-card">
+        <div class="row"><span class="achievement-code">${escapeHtml(achievement.code)}</span><span class="status-pill">${escapeHtml(achievement.rarity)}</span></div>
+        <h3>${escapeHtml(achievement.name)}</h3>
+        <p class="card-copy">${escapeHtml(achievement.evidence?.rule || "Derived from finalized history")}</p>
+        <span class="muted">${escapeHtml(achievement.scope_type)} · ${escapeHtml(shortValue(achievement.scope_id))}</span>
+      </article>`).join("")}</section>` : `<div class="empty-state">No competitive achievements yet. Complete a fully played Public Ranked Battle to begin.</div>`}
+    <div class="alert"><strong>REWARDS · COMING SOON.</strong> These titles are cosmetic. No tokens, SOL, cash, staking, or guaranteed payout is attached to an unlock.</div>`;
+}
+
 function renderView() {
   switch (state.view) {
+    case "profile":
+      return renderProfile();
     case "queue":
       return renderQueue();
     case "roster":
@@ -723,6 +828,7 @@ function renderView() {
 function renderNav() {
   const items = [
     ["home", "HOME"],
+    ["profile", "PROGRESS"],
     ["queue", "RANKED"],
     ["private", "PRIVATE"],
     ["replay", "REPLAY"],
@@ -806,6 +912,11 @@ document.addEventListener("click", async (event) => {
   if (action === "private") {
     await loadPrivateMarkets();
     setView("private");
+    return;
+  }
+  if (action === "profile") {
+    await loadProfile();
+    setView("profile");
     return;
   }
   if (action === "home" || action === "queue" || action === "battle" || action === "result" || action === "proof") {

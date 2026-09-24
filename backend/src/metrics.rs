@@ -208,6 +208,21 @@ const KNOWN_METRICS: &[(&str, &str, &str)] = &[
         "Rating reconciliation mismatches",
         "counter",
     ),
+    (
+        "achievement_unlocks_total",
+        "Achievement unlocks materialized from authoritative history",
+        "counter",
+    ),
+    (
+        "achievement_reconciliation_failures_total",
+        "Achievement reconciliation failures",
+        "counter",
+    ),
+    (
+        "operational_incidents_total",
+        "Retained fail-closed operational incidents",
+        "counter",
+    ),
     ("forfeit_total", "Player-attributable forfeits", "counter"),
     ("battle_void_total", "Voided Battles", "counter"),
     (

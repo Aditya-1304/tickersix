@@ -836,6 +836,59 @@ async fn update_forfeit_rating(
     Ok(())
 }
 
+/// Checks the mutable rating projection against the append-only rating event
+/// ledger. The ledger is the recovery source; this read-only pass only records
+/// drift and never repairs a row by guessing over chain history.
+pub async fn reconcile_projection(pool: &PgPool) -> Result<u64, RatingError> {
+    let rows = sqlx::query(
+        "SELECT r.rating, r.rated_games,
+                COALESCE(last_event.rating_after, 1500) AS expected_rating,
+                COALESCE(played_events.played_games, 0) AS expected_games
+         FROM ratings r
+         LEFT JOIN LATERAL (
+             SELECT rating_after
+             FROM rating_events e
+             WHERE e.season_id = r.season_id AND e.wallet = r.wallet
+             ORDER BY e.round_sequence DESC, e.id DESC
+             LIMIT 1
+         ) last_event ON TRUE
+         LEFT JOIN LATERAL (
+             SELECT COUNT(*) AS played_games
+             FROM rating_events e
+             WHERE e.season_id = r.season_id
+               AND e.wallet = r.wallet
+               AND e.event_kind = $1
+         ) played_events ON TRUE
+         WHERE r.season_id = (SELECT id FROM seasons WHERE status = 'ACTIVE' LIMIT 1)",
+    )
+    .bind(PLAYED_EVENT_KIND)
+    .fetch_all(pool)
+    .await
+    .map_err(storage_error)?;
+    let mut mismatches = 0;
+    for row in rows {
+        let actual_rating: i32 = row.try_get("rating").map_err(storage_error)?;
+        let actual_games: i32 = row.try_get("rated_games").map_err(storage_error)?;
+        let expected_rating: i32 = row.try_get("expected_rating").map_err(storage_error)?;
+        let expected_games: i64 = row.try_get("expected_games").map_err(storage_error)?;
+        if !rating_projection_matches(actual_rating, actual_games, expected_rating, expected_games)
+        {
+            mismatches += 1;
+            metrics::increment("rating_reconciliation_mismatch_total", 1);
+        }
+    }
+    Ok(mismatches)
+}
+
+fn rating_projection_matches(
+    actual_rating: i32,
+    actual_games: i32,
+    expected_rating: i32,
+    expected_games: i64,
+) -> bool {
+    actual_rating == expected_rating && i64::from(actual_games) == expected_games
+}
+
 pub fn rating_tier(rating: i32, rated_games: i32) -> &'static str {
     if rated_games < PLACEMENT_BATTLES {
         "UNRANKED"
@@ -891,5 +944,12 @@ mod tests {
         assert_eq!(rating_tier(protocol::INITIAL_RATING, 5), "SILVER");
         assert_eq!(forfeit_rating_after(1500).unwrap(), 1492);
         assert_eq!(forfeit_rating_after(100).unwrap(), 100);
+    }
+
+    #[test]
+    fn rating_reconciliation_detects_projection_drift_without_repairing_it() {
+        assert!(rating_projection_matches(1517, 1, 1517, 1));
+        assert!(!rating_projection_matches(1500, 1, 1517, 1));
+        assert!(!rating_projection_matches(1517, 0, 1517, 1));
     }
 }

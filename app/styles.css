@@ -778,6 +778,30 @@ h3 {
   text-align: center;
 }
 
+.achievement-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.achievement-card {
+  display: grid;
+  gap: 10px;
+  min-height: 170px;
+}
+
+.achievement-card h3,
+.achievement-card .card-copy {
+  margin-bottom: 0;
+}
+
+.achievement-code {
+  color: var(--cyan);
+  font-size: 0.72rem;
+  font-weight: 850;
+  letter-spacing: 0.08em;
+}
+
 @media (max-width: 760px) {
   .shell {
     width: min(100% - 22px, 620px);
@@ -799,6 +823,7 @@ h3 {
   .grid.three,
   .proof-grid,
   .private-asset-grid,
+  .achievement-grid,
   .private-detail-grid {
     grid-template-columns: 1fr;
   }
