@@ -214,6 +214,11 @@ const KNOWN_METRICS: &[(&str, &str, &str)] = &[
         "counter",
     ),
     (
+        "achievement_evidence_missing_total",
+        "Settled eligible Battles missing valid finalized lineup evidence",
+        "counter",
+    ),
+    (
         "achievement_reconciliation_failures_total",
         "Achievement reconciliation failures",
         "counter",

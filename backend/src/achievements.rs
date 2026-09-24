@@ -95,6 +95,7 @@ pub struct BattleAchievementFact {
     pub opponent_rating_before: Option<i32>,
     pub rating_after: Option<i32>,
     pub margin_bps: Option<i64>,
+    pub facts_version: Option<i32>,
     pub returns_q9: Option<[i64; 6]>,
     pub captain_return_q9: Option<i64>,
 }
@@ -254,7 +255,7 @@ pub fn derive_battle_unlocks(
             &state,
         );
     }
-    if fact.settled {
+    if fact.settled && fact.facts_version == Some(crate::battle_facts::CURRENT_FACTS_VERSION) {
         if let (Some(returns), Some(captain_return)) = (fact.returns_q9, fact.captain_return_q9) {
             if captain_return >= returns.into_iter().max().unwrap_or(captain_return) {
                 add_unlock(
@@ -303,6 +304,9 @@ fn add_unlock(
             "round_sequence": fact.round_sequence,
             "win_streak": state.win_streak,
             "fully_played_rated_battles": state.fully_played_rated_battles,
+            "facts_version": fact.facts_version,
+            "returns_q9": fact.returns_q9,
+            "captain_return_q9": fact.captain_return_q9,
         }),
     });
 }
@@ -326,9 +330,18 @@ pub async fn reconcile_wallet(
         "SELECT b.chain_pubkey, mr.round_sequence, b.mode, b.rated,
                 mr.competition_domain, mr.is_replay, b.state, b.result,
                 b.player_a, b.player_b, b.score_a_q9, b.score_b_q9,
-                re.rating_before, re.opponent_rating_snapshot, re.rating_after
+                re.rating_before, re.opponent_rating_snapshot, re.rating_after,
+                f.facts_version,
+                f.side_a_lineup::text AS side_a_lineup_json,
+                f.side_a_captain,
+                f.side_a_returns_q9::text AS side_a_returns_q9_json,
+                f.side_b_lineup::text AS side_b_lineup_json,
+                f.side_b_captain,
+                f.side_b_returns_q9::text AS side_b_returns_q9_json
          FROM battles b
          JOIN market_rounds mr ON mr.id = b.market_round_id
+         LEFT JOIN battle_competitive_facts f
+           ON f.battle_pubkey = b.chain_pubkey
          LEFT JOIN rating_events re
            ON re.battle_pubkey = b.chain_pubkey AND re.wallet = $1
          WHERE (b.player_a = $1 OR b.player_b = $1) AND b.rated
@@ -473,14 +486,64 @@ fn battle_fact_from_row(
     let state: String = row.try_get("state").map_err(storage_error)?;
     let mode: String = row.try_get("mode").map_err(storage_error)?;
     let domain: String = row.try_get("competition_domain").map_err(storage_error)?;
+    let official = mode != "PRIVATE_MARKET" && domain == "PUBLIC_EQUITY";
+    let rated: bool = row.try_get("rated").map_err(storage_error)?;
+    let replay: bool = row.try_get("is_replay").map_err(storage_error)?;
+    let voided = state == "VOIDED" || outcome == BattleOutcome::SystemVoid;
+    let settled = state == "SETTLED";
+    let played = matches!(
+        outcome,
+        BattleOutcome::PlayedWin | BattleOutcome::PlayedLoss | BattleOutcome::PlayedDraw
+    );
+    let facts_version: Option<i32> = row.try_get("facts_version").map_err(storage_error)?;
+    let side_a_lineup_json: Option<String> =
+        row.try_get("side_a_lineup_json").map_err(storage_error)?;
+    let side_a_captain: Option<i32> = row.try_get("side_a_captain").map_err(storage_error)?;
+    let side_a_returns_q9_json: Option<String> = row
+        .try_get("side_a_returns_q9_json")
+        .map_err(storage_error)?;
+    let side_b_lineup_json: Option<String> =
+        row.try_get("side_b_lineup_json").map_err(storage_error)?;
+    let side_b_captain: Option<i32> = row.try_get("side_b_captain").map_err(storage_error)?;
+    let side_b_returns_q9_json: Option<String> = row
+        .try_get("side_b_returns_q9_json")
+        .map_err(storage_error)?;
+    let (lineup_json, captain, returns_q9_json) = if wallet == player_a {
+        (
+            side_a_lineup_json.as_deref(),
+            side_a_captain,
+            side_a_returns_q9_json.as_deref(),
+        )
+    } else {
+        (
+            side_b_lineup_json.as_deref(),
+            side_b_captain,
+            side_b_returns_q9_json.as_deref(),
+        )
+    };
+    let expected_lineup_evidence = official && rated && !replay && !voided && settled && played;
+    let (returns_q9, captain_return_q9) = match decode_finalized_side_evidence(
+        facts_version,
+        lineup_json,
+        captain,
+        returns_q9_json,
+    ) {
+        Ok(Some((returns, captain_return))) => (Some(returns), Some(captain_return)),
+        Ok(None) | Err(_) => {
+            if expected_lineup_evidence {
+                metrics::increment("achievement_evidence_missing_total", 1);
+            }
+            (None, None)
+        }
+    };
     Ok(BattleAchievementFact {
         battle_pubkey: row.try_get("chain_pubkey").map_err(storage_error)?,
         round_sequence: row.try_get("round_sequence").map_err(storage_error)?,
-        official: mode != "PRIVATE_MARKET" && domain == "PUBLIC_EQUITY",
-        rated: row.try_get("rated").map_err(storage_error)?,
-        replay: row.try_get("is_replay").map_err(storage_error)?,
-        voided: state == "VOIDED" || outcome == BattleOutcome::SystemVoid,
-        settled: state == "SETTLED",
+        official,
+        rated,
+        replay,
+        voided,
+        settled,
         outcome,
         own_rating_before: row.try_get("rating_before").map_err(storage_error)?,
         opponent_rating_before: row
@@ -488,9 +551,70 @@ fn battle_fact_from_row(
             .map_err(storage_error)?,
         rating_after: row.try_get("rating_after").map_err(storage_error)?,
         margin_bps,
-        returns_q9: None,
-        captain_return_q9: None,
+        facts_version,
+        returns_q9,
+        captain_return_q9,
     })
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FinalizedEvidenceDecodeError {
+    Incomplete,
+    UnsupportedVersion,
+    InvalidJson,
+    InvalidLineup,
+    CaptainNotInLineup,
+}
+
+/// Decodes one player's durable finalized facts while preserving the lineup
+/// order used by the authority engine. Missing data is distinct from malformed
+/// data so reconciliation can fail closed without manufacturing an unlock.
+fn decode_finalized_side_evidence(
+    facts_version: Option<i32>,
+    lineup_json: Option<&str>,
+    captain: Option<i32>,
+    returns_q9_json: Option<&str>,
+) -> Result<Option<([i64; 6], i64)>, FinalizedEvidenceDecodeError> {
+    if facts_version.is_none()
+        && lineup_json.is_none()
+        && captain.is_none()
+        && returns_q9_json.is_none()
+    {
+        return Ok(None);
+    }
+
+    let (Some(facts_version), Some(lineup_json), Some(captain), Some(returns_q9_json)) =
+        (facts_version, lineup_json, captain, returns_q9_json)
+    else {
+        return Err(FinalizedEvidenceDecodeError::Incomplete);
+    };
+    if facts_version != crate::battle_facts::CURRENT_FACTS_VERSION {
+        return Err(FinalizedEvidenceDecodeError::UnsupportedVersion);
+    }
+
+    let lineup: Vec<u16> =
+        serde_json::from_str(lineup_json).map_err(|_| FinalizedEvidenceDecodeError::InvalidJson)?;
+    let returns: Vec<i64> = serde_json::from_str(returns_q9_json)
+        .map_err(|_| FinalizedEvidenceDecodeError::InvalidJson)?;
+    if lineup.len() != 6 || returns.len() != 6 {
+        return Err(FinalizedEvidenceDecodeError::InvalidLineup);
+    }
+    let mut unique_assets = lineup.clone();
+    unique_assets.sort_unstable();
+    unique_assets.dedup();
+    if unique_assets.len() != 6 {
+        return Err(FinalizedEvidenceDecodeError::InvalidLineup);
+    }
+    let captain =
+        u16::try_from(captain).map_err(|_| FinalizedEvidenceDecodeError::InvalidLineup)?;
+    let captain_index = lineup
+        .iter()
+        .position(|asset_id| *asset_id == captain)
+        .ok_or(FinalizedEvidenceDecodeError::CaptainNotInLineup)?;
+    let returns_q9: [i64; 6] = returns
+        .try_into()
+        .map_err(|_| FinalizedEvidenceDecodeError::InvalidLineup)?;
+    Ok(Some((returns_q9, returns_q9[captain_index])))
 }
 
 async fn load_known_codes(
@@ -635,6 +759,7 @@ mod tests {
             opponent_rating_before: Some(1750),
             rating_after: Some(1517),
             margin_bps: Some(5),
+            facts_version: Some(1),
             returns_q9: Some([1, 2, 3, 4, 5, 6]),
             captain_return_q9: Some(6),
         }
@@ -712,6 +837,17 @@ mod tests {
     }
 
     #[test]
+    fn missing_finalized_evidence_cannot_unlock_captain_or_green_six() {
+        let mut battle = fact(BattleOutcome::PlayedWin);
+        battle.facts_version = None;
+
+        let (_, unlocks) =
+            derive_battle_unlocks(&battle, AchievementState::default(), &HashSet::new());
+        assert!(!unlocks.iter().any(|unlock| unlock.code == PERFECT_CAPTAIN));
+        assert!(!unlocks.iter().any(|unlock| unlock.code == GREEN_SIX));
+    }
+
+    #[test]
     fn streak_thresholds_and_rating_thresholds_are_derived_from_ordered_state() {
         let mut state = AchievementState::default();
         let mut known = HashSet::new();
@@ -732,5 +868,38 @@ mod tests {
         assert!(all_codes.contains(&HAT_TRICK));
         assert!(all_codes.contains(&UNSTOPPABLE));
         assert!(all_codes.contains(&MASTER));
+    }
+
+    #[test]
+    fn finalized_evidence_decoder_preserves_return_order_and_captain_return() {
+        let decoded = decode_finalized_side_evidence(
+            Some(1),
+            Some("[7,8,9,10,11,12]"),
+            Some(7),
+            Some("[10,20,30,40,50,60]"),
+        )
+        .expect("valid finalized evidence")
+        .expect("evidence is present");
+
+        assert_eq!(decoded.0, [10, 20, 30, 40, 50, 60]);
+        assert_eq!(decoded.1, 10);
+    }
+
+    #[test]
+    fn finalized_evidence_decoder_rejects_partial_or_malformed_evidence() {
+        assert!(decode_finalized_side_evidence(
+            Some(1),
+            Some("[7,8,9,10,11,12]"),
+            None,
+            Some("[10,20,30,40,50,60]"),
+        )
+        .is_err());
+        assert!(decode_finalized_side_evidence(
+            Some(1),
+            Some("[7,7,9,10,11,12]"),
+            Some(7),
+            Some("[10,20,30,40,50,60]"),
+        )
+        .is_err());
     }
 }
