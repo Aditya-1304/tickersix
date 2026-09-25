@@ -14,6 +14,31 @@ import { discoverWallet } from "./wallet-client.js";
 const API_BASE = window.TICKERSIX_API_BASE || (window.location.port === "4173" ? "http://127.0.0.1:8788" : "");
 const APP_MODE = new URLSearchParams(window.location.search).get("mode") === "demo" ? "DEMO" : "LIVE";
 const DEMO_MODE = APP_MODE === "DEMO";
+const TICKERSIX_PROGRAM_ID = window.TICKERSIX_PROGRAM_ID || "8sehrRxpnLbvpzgJx8MqB5YApZAh69z5yVvdK1Zeyj6Z";
+const SOLANA_EXPLORER_BASE = "https://explorer.solana.com";
+
+function isSolanaIdentifier(value) {
+  return !DEMO_MODE && /^[1-9A-HJ-NP-Za-km-z]{32,88}$/.test(String(value || ""));
+}
+
+function devnetTxUrl(signature) {
+  return isSolanaIdentifier(signature) ? `${SOLANA_EXPLORER_BASE}/tx/${encodeURIComponent(signature)}?cluster=devnet` : null;
+}
+
+function devnetAddressUrl(address) {
+  return isSolanaIdentifier(address) ? `${SOLANA_EXPLORER_BASE}/address/${encodeURIComponent(address)}?cluster=devnet` : null;
+}
+
+function explorerLink(kind, value, label = shortValue(value)) {
+  const url = kind === "tx" ? devnetTxUrl(value) : devnetAddressUrl(value);
+  const text = escapeHtml(label || value || "UNAVAILABLE");
+  return url ? `<a href="${url}" target="_blank" rel="noreferrer">${text} ↗</a>` : `<code>${text}</code>`;
+}
+
+function explorerAction(kind, value, label) {
+  const url = kind === "tx" ? devnetTxUrl(value) : devnetAddressUrl(value);
+  return url ? `<a class="button" href="${url}" target="_blank" rel="noreferrer">${escapeHtml(label)} ↗</a>` : `<span class="button ghost">${escapeHtml(label)} unavailable</span>`;
+}
 const DEMO_BATTLE = "11111111111111111111111111111111";
 
 const SOURCE_INFO = {
@@ -994,10 +1019,10 @@ function renderLineupReview() {
     ? "<div class=\"alert\"><strong>" + escapeHtml(revealStageLabels[state.revealStage] || state.revealStage) + "</strong>" + (state.revealError ? "<br />" + escapeHtml(state.revealError) : "") + "</div>"
     : "";
   const revealTransactionNotice = state.revealSignature
-    ? "<div class=\"proof-grid\"><div class=\"proof-item\"><small>Reveal transaction</small><a href=\"https://explorer.solana.com/tx/" + encodeURIComponent(state.revealSignature) + "?cluster=devnet\" target=\"_blank\" rel=\"noreferrer\">" + escapeHtml(shortValue(state.revealSignature)) + " ↗</a></div><div class=\"proof-item\"><small>Reveal deadline</small><code>" + escapeHtml(new Date((state.round.reveal_deadline || 0) * 1000).toISOString()) + "</code></div></div>"
+    ? "<div class=\"proof-grid\"><div class=\"proof-item\"><small>Reveal transaction</small>" + explorerLink("tx", state.revealSignature) + "</div><div class=\"proof-item\"><small>Reveal deadline</small><code>" + escapeHtml(new Date((state.round.reveal_deadline || 0) * 1000).toISOString()) + "</code></div></div>"
     : "";
   const transactionNotice = state.commitSignature
-    ? "<div class=\"proof-grid\"><div class=\"proof-item\"><small>Transaction</small><a href=\"https://explorer.solana.com/tx/" + encodeURIComponent(state.commitSignature) + "?cluster=devnet\" target=\"_blank\" rel=\"noreferrer\">" + escapeHtml(shortValue(state.commitSignature)) + " ↗</a></div><div class=\"proof-item\"><small>Commitment</small><code>" + escapeHtml(shortValue(state.commitment)) + "</code></div><div class=\"proof-item\"><small>Locked before</small><code>" + escapeHtml(lockLabel) + "</code></div></div>"
+    ? "<div class=\"proof-grid\"><div class=\"proof-item\"><small>Transaction</small>" + explorerLink("tx", state.commitSignature) + "</div><div class=\"proof-item\"><small>Commitment</small><code>" + escapeHtml(shortValue(state.commitment)) + "</code></div><div class=\"proof-item\"><small>Locked before</small><code>" + escapeHtml(lockLabel) + "</code></div></div>"
     : "";
   const capabilityNotice = state.authenticated && !canSend && state.commitStage !== "locked"
     ? "<div class=\"alert\"><strong>TRANSACTION WALLET REQUIRED:</strong> reconnect with a Devnet wallet that supports Wallet Standard signAndSendTransaction.</div>"
@@ -1138,11 +1163,12 @@ function renderProof() {
   const scoreBQ9 = battle.side_b_score_q9 ?? "UNAVAILABLE";
   const finalizedAssets = proof.round_assets.filter((asset) => asset.start?.state === "FINALIZED" && asset.end?.state === "FINALIZED").length;
   const retainedLineupTransactions = [sideA, sideB].every((participant) => participant.commit_transaction_signature && participant.reveal_transaction_signature);
+  const settlementAction = explorerAction("tx", round.settlement_transaction_signature, "VIEW SETTLEMENT TX");
   const assetRows = proof.round_assets
-    .map((asset) => `<div class="proof-item"><small>${escapeHtml(asset.symbol)} · ${escapeHtml(asset.round_asset_pubkey || "ROUND ASSET PDA UNAVAILABLE")}</small><code>start_q9=${escapeHtml(asset.start?.finalized_price_q9 ?? "UNAVAILABLE")} · end_q9=${escapeHtml(asset.end?.finalized_price_q9 ?? "UNAVAILABLE")} · return=${escapeHtml(asset.display_return || formatScore(asset.return_q9))}</code></div>`)
+    .map((asset) => `<div class="proof-item"><small>${escapeHtml(asset.symbol)} · ${explorerLink("address", asset.round_asset_pubkey, shortValue(asset.round_asset_pubkey || "ROUND ASSET PDA UNAVAILABLE"))}</small><code>start_q9=${escapeHtml(asset.start?.finalized_price_q9 ?? "UNAVAILABLE")} · end_q9=${escapeHtml(asset.end?.finalized_price_q9 ?? "UNAVAILABLE")} · return=${escapeHtml(asset.display_return || formatScore(asset.return_q9))}</code></div>`)
     .join("");
   const transactionRows = proof.transaction_signatures
-    .map((signature) => `<div class="proof-item"><small>Retained settlement evidence</small><code>${escapeHtml(signature)}</code></div>`)
+    .map((signature) => `<div class="proof-item"><small>Retained transaction</small>${explorerLink("tx", signature)}</div>`)
     .join("");
   return `
     <section class="hero">
@@ -1153,17 +1179,23 @@ function renderProof() {
     <article class="card">
       <div class="source-line"><span class="source-pill final">${escapeHtml(proof.source_trust_label)}</span><span class="domain-pill">PUBLIC EQUITY</span><span class="cluster-pill">RECONCILED SLOT ${escapeHtml(proof.reconciled_slot)}</span></div>
       <div class="grid three">
-        <div class="stat-card"><span class="stat-label">Canonical result</span><span class="stat-value">${escapeHtml(battle.result)}</span><span class="stat-subvalue">Battle ${escapeHtml(shortValue(battle.battle_pubkey))}</span></div>
+        <div class="stat-card"><span class="stat-label">Canonical result</span><span class="stat-value">${escapeHtml(battle.result)}</span><span class="stat-subvalue">Battle ${explorerLink("address", battle.battle_pubkey, shortValue(battle.battle_pubkey))}</span></div>
         <div class="stat-card"><span class="stat-label">Player A score</span><span class="stat-value">${escapeHtml(formatScore(battle.side_a_score_q9))}</span><span class="stat-subvalue">Q9 ${escapeHtml(scoreAQ9)}</span></div>
         <div class="stat-card"><span class="stat-label">Player B score</span><span class="stat-value">${escapeHtml(formatScore(battle.side_b_score_q9))}</span><span class="stat-subvalue">Q9 ${escapeHtml(scoreBQ9)}</span></div>
       </div>
       <div class="section-heading"><h2>SETTLEMENT EVIDENCE</h2><span class="muted">${finalizedAssets}/${proof.round_assets.length} assets finalized</span></div>
       <div class="proof-grid">
-        <div class="proof-item"><small>Lineup participants</small><code>${escapeHtml(sideA.wallet)} · ${escapeHtml(sideB.wallet)}</code></div>
-        <div class="proof-item"><small>Lineup transaction coverage</small><code>${retainedLineupTransactions ? "COMMIT + REVEAL RETAINED" : "INCOMPLETE"}</code></div>
-        <div class="proof-item"><small>Frozen MarketRound</small><code>${escapeHtml(round.market_round_pubkey)}</code></div>
-        <div class="proof-item"><small>Settlement transaction</small><code>${escapeHtml(round.settlement_transaction_signature || "UNAVAILABLE")}</code></div>
+        <div class="proof-item"><small>Side A wallet</small>${explorerLink("address", sideA.wallet, shortValue(sideA.wallet))}</div>
+        <div class="proof-item"><small>Side B wallet</small>${explorerLink("address", sideB.wallet, shortValue(sideB.wallet))}</div>
+        <div class="proof-item"><small>Side A commit</small>${explorerLink("tx", sideA.commit_transaction_signature)}</div>
+        <div class="proof-item"><small>Side A reveal</small>${explorerLink("tx", sideA.reveal_transaction_signature)}</div>
+        <div class="proof-item"><small>Side B commit</small>${explorerLink("tx", sideB.commit_transaction_signature)}</div>
+        <div class="proof-item"><small>Side B reveal</small>${explorerLink("tx", sideB.reveal_transaction_signature)}</div>
+        <div class="proof-item"><small>Frozen MarketRound</small>${explorerLink("address", round.market_round_pubkey, shortValue(round.market_round_pubkey))}</div>
+        <div class="proof-item"><small>Settlement transaction</small>${explorerLink("tx", round.settlement_transaction_signature)}</div>
+        <div class="proof-item"><small>PROGRAM ID</small>${explorerLink("address", TICKERSIX_PROGRAM_ID, shortValue(TICKERSIX_PROGRAM_ID))}</div>
         <div class="proof-item"><small>Policy versions</small><code>registry ${escapeHtml(round.registry_version)} · price P${escapeHtml(round.price_policy_version)} · quality Q${escapeHtml(round.quality_policy_version)} · attestors A${escapeHtml(round.attestor_set_version)}</code></div>
+        <div class="proof-item"><small>Lineup transaction coverage</small><code>${retainedLineupTransactions ? "COMMIT + REVEAL RETAINED" : "INCOMPLETE"}</code></div>
       </div>
       <div class="section-heading"><h2>ROUND ASSET PROOF</h2><span class="muted">Canonical frozen assets</span></div>
       <div class="proof-grid">${assetRows}</div>
@@ -1171,7 +1203,7 @@ function renderProof() {
       <div class="grid two"><div class="alert"><strong>Side A</strong><br />Wallet: ${escapeHtml(sideA.wallet)}<br />Captain: ${escapeHtml(battle.side_a_captain ?? "UNAVAILABLE")}<br />Lineup: ${escapeHtml(battle.side_a_lineup.join(" · "))}</div><div class="alert"><strong>Side B</strong><br />Wallet: ${escapeHtml(sideB.wallet)}<br />Captain: ${escapeHtml(battle.side_b_captain ?? "UNAVAILABLE")}<br />Lineup: ${escapeHtml(battle.side_b_lineup.join(" · "))}</div></div>
       <div class="section-heading"><h2>Retained transactions</h2></div>
       <div class="proof-grid">${transactionRows}</div>
-      <div class="proof-actions"><button class="button" data-action="replay">REPLAY FINALIZED ROUND</button><button class="button secondary" data-action="result">BACK TO RESULT</button></div>
+      <div class="proof-actions">${settlementAction}<button class="button secondary" data-action="replay">REPLAY FINALIZED ROUND</button><button class="button ghost" data-action="result">BACK TO RESULT</button></div>
     </article>`;
 }
 function renderReplay() {
