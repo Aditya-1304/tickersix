@@ -6,6 +6,8 @@
 
 use std::{env, error::Error, fmt, path::PathBuf, sync::Arc, time::Duration};
 
+use tower_http::cors::{Any, CorsLayer};
+
 use axum::{
     extract::{Path, Query, State},
     http::{header, HeaderMap, HeaderValue, StatusCode},
@@ -13,7 +15,7 @@ use axum::{
         sse::{KeepAlive, Sse},
         IntoResponse, Response,
     },
-    routing::{get, post, put},
+    routing::{get, post},
     Json, Router,
 };
 use serde::{Deserialize, Serialize};
@@ -40,6 +42,8 @@ pub struct ApiState {
     pub pool: PgPool,
     pub auth_domain: Arc<str>,
     pub secure_cookie: bool,
+    /// Optional web UI origin for credentialed browser requests.
+    pub web_origin: Option<Arc<str>>,
     /// Optional local proof snapshot used by the read-only proof API.
     pub proof_snapshot_path: Option<Arc<PathBuf>>,
     pub private_markets: Arc<private_markets::PrivateMarketsService>,
@@ -51,6 +55,7 @@ impl ApiState {
             pool,
             auth_domain: auth_domain.into(),
             secure_cookie,
+            web_origin: None,
             proof_snapshot_path: None,
             private_markets: Arc::new(private_markets::PrivateMarketsService::from_env()),
         }
@@ -58,6 +63,11 @@ impl ApiState {
 }
 
 impl ApiState {
+    pub fn with_web_origin(mut self, origin: impl Into<Arc<str>>) -> Self {
+        self.web_origin = Some(origin.into());
+        self
+    }
+
     pub fn with_proof_snapshot_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.proof_snapshot_path = Some(Arc::new(path.into()));
         self
@@ -65,7 +75,8 @@ impl ApiState {
 }
 
 pub fn router(state: ApiState) -> Router {
-    Router::new()
+    let web_origin = state.web_origin.clone();
+    let router = Router::new()
         .route("/health", get(health))
         .route("/v1/auth/challenge", post(create_challenge))
         .route("/v1/auth/verify", post(verify_challenge))
@@ -76,7 +87,7 @@ pub fn router(state: ApiState) -> Router {
             "/v1/profiles/:wallet/achievements",
             get(get_profile_achievements),
         )
-        .route("/v1/profile/me", put(update_my_profile))
+        .route("/v1/profile/me", get(get_my_profile).put(update_my_profile))
         .route("/v1/market-rounds/next", get(get_next_market_round))
         .route(
             "/v1/market-rounds/:pubkey/proof",
@@ -115,7 +126,22 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/leaderboards/global/me", get(get_my_leaderboard))
         .route("/v1/stream/battles/:pubkey", get(stream_battle))
         .route("/metrics", get(get_metrics))
-        .with_state(state)
+        .with_state(state);
+
+    match web_origin {
+        Some(origin) => router.layer(
+            CorsLayer::new()
+                .allow_origin(
+                    origin
+                        .parse::<HeaderValue>()
+                        .expect("configured web origin is a valid header value"),
+                )
+                .allow_credentials(true)
+                .allow_methods(Any)
+                .allow_headers(Any),
+        ),
+        None => router,
+    }
 }
 
 /// Starts the HTTP service from runtime configuration.
@@ -131,6 +157,7 @@ pub async fn serve_from_env() -> Result<(), Box<dyn Error>> {
     let secure_cookie = env::var("TICKERSIX_SECURE_COOKIE")
         .map(|value| value == "1" || value.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
+    let web_origin = env::var("TICKERSIX_WEB_ORIGIN").ok();
     let proof_snapshot_path = env::var_os("TICKERSIX_PROOF_SNAPSHOT").map(PathBuf::from);
     let pool = PgPoolOptions::new()
         .max_connections(8)
@@ -143,9 +170,20 @@ pub async fn serve_from_env() -> Result<(), Box<dyn Error>> {
         listener,
         router(match proof_snapshot_path {
             Some(path) => {
-                ApiState::new(pool, auth_domain, secure_cookie).with_proof_snapshot_path(path)
+                let state = ApiState::new(pool.clone(), auth_domain.clone(), secure_cookie)
+                    .with_proof_snapshot_path(path);
+                match web_origin.clone() {
+                    Some(origin) => state.with_web_origin(origin),
+                    None => state,
+                }
             }
-            None => ApiState::new(pool, auth_domain, secure_cookie),
+            None => {
+                let state = ApiState::new(pool, auth_domain, secure_cookie);
+                match web_origin {
+                    Some(origin) => state.with_web_origin(origin),
+                    None => state,
+                }
+            }
         }),
     )
     .await?;
@@ -472,6 +510,14 @@ async fn logout(
         auth::clear_session_cookie(state.secure_cookie),
     );
     Ok((response_headers, StatusCode::NO_CONTENT))
+}
+
+async fn get_my_profile(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+) -> Result<Json<profile::ProfileSummary>, ApiError> {
+    let wallet = authenticated_wallet(&state, &headers).await?;
+    Ok(Json(profile::get_profile(&state.pool, &wallet).await?))
 }
 
 async fn get_profile(

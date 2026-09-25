@@ -2,7 +2,7 @@
 
 This is the mobile-first consumer surface for Public Ranked, replay, proof, and the isolated Private Markets domain. It has no runtime dependency, no paid provider, and no RPC client. The client reads the backend API when it is available and falls back to clearly labelled local demo data when it is not.
 
-The demo surface performs no wallet signing, transaction submission, settlement, rating update, or achievement update. The production queue mutation still requires the backend authentication/session flow.
+The app supports Wallet Standard-compatible message signing for login only. It never asks the wallet to send a transaction, stores private keys, or mutates settlement, rating, or achievement state. When the API is unavailable, the local profile and market data remain clearly labelled demo data.
 
 ## Local checks
 
@@ -19,4 +19,4 @@ From this directory, use any static file server:
 python3 -m http.server 4173
 ```
 
-Then open `http://127.0.0.1:4173`. Set `window.TICKERSIX_API_BASE` before loading the module if the API is hosted on another origin and CORS is configured for it.
+Then open `http://localhost:4173`. If the API is hosted on another origin, configure the browser page with `window.TICKERSIX_API_BASE` and start the API with `TICKERSIX_WEB_ORIGIN=http://localhost:4173`. The API only enables credentialed CORS when that origin is explicitly configured.

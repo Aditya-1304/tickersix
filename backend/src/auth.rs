@@ -109,6 +109,25 @@ pub fn verify_wallet_signature(
         .map_err(|_| AuthError::InvalidSignature)
 }
 
+/// Enforces the one-time challenge state transition before signature work.
+///
+/// Keeping expiry and consumption checks together prevents a caller from
+/// accidentally accepting a previously consumed or time-invalid challenge
+/// when the database-backed verifier evolves.
+pub fn validate_challenge_window(
+    consumed_at: Option<i64>,
+    expires_at: i64,
+    now: i64,
+) -> Result<(), AuthError> {
+    if consumed_at.is_some() {
+        return Err(AuthError::ChallengeConsumed);
+    }
+    if now >= expires_at {
+        return Err(AuthError::ChallengeExpired);
+    }
+    Ok(())
+}
+
 pub fn new_nonce() -> String {
     let mut bytes = [0u8; 32];
     OsRng.fill_bytes(&mut bytes);
@@ -218,12 +237,7 @@ pub async fn verify_challenge(
     if stored_wallet != wallet || stored_domain != domain {
         return Err(AuthError::DomainMismatch);
     }
-    if consumed_at.is_some() {
-        return Err(AuthError::ChallengeConsumed);
-    }
-    if now >= expires_at {
-        return Err(AuthError::ChallengeExpired);
-    }
+    validate_challenge_window(consumed_at, expires_at, now)?;
     verify_wallet_signature(wallet, &message, signature_base58)?;
 
     sqlx::query("UPDATE auth_challenges SET consumed_at = $1 WHERE nonce = $2")
@@ -362,6 +376,19 @@ mod tests {
             verify_wallet_signature(&other_wallet, &message, &signature),
             Err(AuthError::InvalidSignature)
         );
+    }
+
+    #[test]
+    fn expired_or_consumed_challenges_are_rejected_before_signature_work() {
+        assert_eq!(
+            validate_challenge_window(None, 10, 10),
+            Err(AuthError::ChallengeExpired)
+        );
+        assert_eq!(
+            validate_challenge_window(Some(9), 10, 1),
+            Err(AuthError::ChallengeConsumed)
+        );
+        assert!(validate_challenge_window(None, 10, 9).is_ok());
     }
 
     #[test]

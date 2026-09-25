@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 
-const requiredFiles = ["index.html", "styles.css", "app.js", "package.json"];
+const requiredFiles = ["index.html", "styles.css", "app.js", "wallet-client.js", "wallet-client.test.mjs", "package.json"];
 const requiredMarkers = [
   ["index.html", "TickerSix"],
   ["styles.css", "@media (max-width: 760px)"],
@@ -10,6 +10,11 @@ const requiredMarkers = [
   ["app.js", "PRIVATE_MARKET"],
   ["app.js", "PROVIDER_CLAIMS_NOT_CANONICALLY_COMPARABLE"],
   ["app.js", "/v1/private-markets/assets"],
+  ["app.js", "/v1/auth/challenge"],
+  ["app.js", "/v1/auth/verify"],
+  ["app.js", "/v1/profile/me"],
+  ["app.js", "/v1/leagues"],
+  ["wallet-client.js", "wallet-standard:register-wallet"],
 ];
 
 for (const file of requiredFiles) await readFile(new URL(`./${file}`, import.meta.url));

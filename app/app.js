@@ -7,6 +7,8 @@
  * This client never signs, sends, settles, rates, or mutates achievements.
  */
 
+import { discoverWallet } from "./wallet-client.js";
+
 const API_BASE = window.TICKERSIX_API_BASE || "";
 const DEMO_BATTLE = "11111111111111111111111111111111";
 
@@ -317,6 +319,20 @@ const state = {
   replayPlaying: false,
   replayTimer: null,
   wallet: null,
+  walletAdapter: null,
+  authenticated: false,
+  authExpiresAt: null,
+  authBusy: false,
+  authError: null,
+  queueEntry: null,
+  leagues: [],
+  leagueMemberships: {},
+  leagueInstructions: {},
+  leaguesLoading: false,
+  leaguesError: null,
+  leagueBusyId: null,
+  profileSaving: false,
+  queueBusy: false,
   backendOnline: false,
   toast: null,
   basisOpen: false,
@@ -374,7 +390,11 @@ async function api(path, options = {}) {
     ...options,
   });
   if (!response.ok) {
-    throw new Error((await response.json().catch(() => null))?.error || `HTTP ${response.status}`);
+    const body = await response.json().catch(() => null);
+    const error = new Error(body?.error || `HTTP ${response.status}`);
+    error.status = response.status;
+    error.code = body?.error || null;
+    throw error;
   }
   return response.status === 204 ? null : response.json();
 }
@@ -430,7 +450,7 @@ async function loadProfile() {
   state.profileLoading = true;
   state.profileError = null;
   render();
-  if (!state.wallet) {
+  if (!state.authenticated) {
     state.profile = DEMO_PROFILE;
     state.achievements = DEMO_ACHIEVEMENTS;
     state.profileLoading = false;
@@ -438,12 +458,14 @@ async function loadProfile() {
     return;
   }
   try {
-    state.profile = await api(`/v1/profiles/${encodeURIComponent(state.wallet)}`);
+    state.profile = await api("/v1/profile/me");
+    state.wallet = state.profile.wallet;
     state.achievements = await api(
       `/v1/profiles/${encodeURIComponent(state.wallet)}/achievements`,
     );
     state.backendOnline = true;
   } catch (error) {
+    if (error.status === 401) clearAuthenticatedState();
     state.profile = DEMO_PROFILE;
     state.achievements = DEMO_ACHIEVEMENTS;
     state.profileError = error.message || "PROFILE_UNAVAILABLE";
@@ -452,6 +474,96 @@ async function loadProfile() {
     render();
   }
 }
+
+async function updateProfile() {
+  if (!state.authenticated) {
+    showToast("Authenticate your wallet before editing your profile.");
+    return;
+  }
+  const displayName = document.querySelector("#profile-display-name")?.value.trim() || null;
+  const avatarUrl = document.querySelector("#profile-avatar-url")?.value.trim() || null;
+  state.profileSaving = true;
+  render();
+  try {
+    state.profile = await api("/v1/profile/me", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ display_name: displayName, avatar_url: avatarUrl }),
+    });
+    state.profileError = null;
+    showToast("Profile updated.");
+  } catch (error) {
+    if (error.status === 401) clearAuthenticatedState();
+    state.profileError = error.message || "PROFILE_UPDATE_FAILED";
+    showToast(`Profile update failed: ${state.profileError}`);
+  } finally {
+    state.profileSaving = false;
+    render();
+  }
+}
+
+async function loadLeagues() {
+  state.leaguesLoading = true;
+  state.leaguesError = null;
+  render();
+  try {
+    state.leagues = await api("/v1/leagues?status=REGISTRATION");
+    state.backendOnline = true;
+  } catch (error) {
+    state.leagues = [];
+    state.leaguesError = error.message || "LEAGUES_UNAVAILABLE";
+  } finally {
+    state.leaguesLoading = false;
+    render();
+  }
+}
+
+async function joinLeague(leagueId) {
+  if (!state.authenticated) {
+    await connectWallet();
+    if (!state.authenticated) return;
+  }
+  state.leagueBusyId = leagueId;
+  render();
+  try {
+    const response = await api(`/v1/leagues/${encodeURIComponent(leagueId)}/join`, {
+      method: "POST",
+    });
+    state.leagueMemberships[leagueId] = response.membership;
+    state.leagueInstructions[leagueId] = response.instruction;
+    showToast("League join intent recorded; the coordinator must confirm the wallet instruction.");
+  } catch (error) {
+    if (error.status === 401) clearAuthenticatedState();
+    showToast(`League join failed: ${error.message}`);
+  } finally {
+    state.leagueBusyId = null;
+    render();
+  }
+}
+
+async function leaveLeague(leagueId) {
+  if (!state.authenticated) {
+    showToast("Authenticate your wallet before leaving a league.");
+    return;
+  }
+  state.leagueBusyId = leagueId;
+  render();
+  try {
+    const response = await api(`/v1/leagues/${encodeURIComponent(leagueId)}/leave`, {
+      method: "POST",
+    });
+    state.leagueMemberships[leagueId] = response.membership;
+    state.leagueInstructions[leagueId] = response.instruction;
+    showToast("League leave intent recorded; the coordinator must confirm the wallet instruction.");
+  } catch (error) {
+    if (error.status === 401) clearAuthenticatedState();
+    showToast(`League leave failed: ${error.message}`);
+  } finally {
+    state.leagueBusyId = null;
+    render();
+  }
+}
+
 
 async function loadPrivateAsset(assetId) {
   state.privateMarketsError = null;
@@ -491,15 +603,19 @@ function privateStatusLabel(exhibition) {
 }
 
 function renderTopbar() {
+  const authControls = state.authenticated
+    ? `<span class="status-pill">AUTHENTICATED · ${escapeHtml(shortValue(state.wallet))}</span><button class="button ghost" data-action="logout">SIGN OUT</button>`
+    : `<button class="button ghost" data-action="connect" ${state.authBusy ? "disabled" : ""}>${state.authBusy ? "SIGNING…" : "CONNECT & AUTHENTICATE"}</button>`;
   return `
     <header class="topbar">
       <button class="brand" data-action="home" aria-label="Return to TickerSix home">
         <span class="brand-mark">TS</span>
         <span>TICKERSIX</span>
       </button>
-      <div class="hero-actions"><span class="cluster-pill">SOLANA DEVNET</span><button class="button ghost" data-action="connect">CONNECT WALLET</button></div>
+      <div class="hero-actions"><span class="cluster-pill">SOLANA DEVNET</span>${authControls}</div>
     </header>`;
 }
+
 
 function renderHome() {
   const source = sourceInfo(state.round.settlement_source_kind);
@@ -550,6 +666,13 @@ function renderHome() {
 
 function renderQueue() {
   const source = sourceInfo(state.round.settlement_source_kind);
+  const action = state.queueEntry
+    ? `<button class="button secondary" data-action="leave-queue" ${state.queueBusy ? "disabled" : ""}>${state.queueBusy ? "LEAVING…" : "LEAVE QUEUE"}</button>`
+    : `<button class="button" data-action="start-roster" ${state.queueBusy ? "disabled" : ""}>${state.queueBusy ? "JOINING…" : "JOIN QUEUE"}</button>`;
+
+  const authStatus = state.authenticated
+    ? `Authenticated as ${escapeHtml(shortValue(state.wallet))}. Queue mutations are tied to this session.`
+    : "Connect and sign the authentication challenge to enter the ranked queue.";
   return `
     <section class="hero">
       <p class="eyebrow">Public Ranked</p>
@@ -557,17 +680,19 @@ function renderQueue() {
       <p class="lede">Matchmaking is scheduled around one shared market window. There is no instant matchmaking and no hidden source switch.</p>
     </section>
     <article class="card">
-      <div class="row"><div><h2>NEXT PUBLIC RANKED ROUND</h2><span class="muted">Round ${escapeHtml(state.round.round_sequence)} · frozen public-equity universe</span></div><span class="status-pill">SCHEDULED</span></div>
+      <div class="row"><div><h2>NEXT PUBLIC RANKED ROUND</h2><span class="muted">Round ${escapeHtml(state.round.round_sequence)} · frozen public-equity universe</span></div><span class="status-pill">${state.queueEntry ? "QUEUED" : "SCHEDULED"}</span></div>
       <div class="source-line"><span class="source-pill">${escapeHtml(source.queue)}</span><span class="domain-pill">${escapeHtml(state.round.competition_domain)}</span><span class="cluster-pill">${escapeHtml(state.round.network)}</span></div>
       <div class="grid two">
         <div><div class="row"><span class="row-label">Round</span><strong>12:00–16:00 UTC</strong></div><div class="row"><span class="row-label">Queue closes</span><strong>11:45 UTC</strong></div></div>
         <div><div class="row"><span class="row-label">Lineups lock</span><strong>11:55 UTC</strong></div><div class="row"><span class="row-label">Rating</span><strong>Gold · 1584</strong></div></div>
       </div>
       <div class="alert"><strong>Source transparency:</strong> the provider and settlement source are frozen before queue admission. You cannot choose a different provider after freeze.</div>
-      <div class="hero-actions"><button class="button" data-action="start-roster">JOIN QUEUE</button><button class="button secondary" data-action="home">BACK HOME</button></div>
-      <p class="muted" style="margin: 16px 0 0; font-size: 0.76rem">Demo mode is read-only. A deployed client must complete wallet auth before calling the queue mutation.</p>
+      <div class="alert"><strong>Session:</strong> ${authStatus}</div>
+      <div class="hero-actions">${action}<button class="button secondary" data-action="home">BACK HOME</button></div>
+      ${state.authError ? `<p class="muted" style="margin: 16px 0 0; font-size: 0.76rem">${escapeHtml(state.authError)}</p>` : ""}
     </article>`;
 }
+
 
 function renderRoster() {
   const selectedCount = state.selectedAssets.size;
@@ -777,7 +902,19 @@ function renderProfile() {
   const profile = state.profile || DEMO_PROFILE;
   const achievements = state.achievements || [];
   const errorNotice = state.profileError
-    ? `<div class="alert"><strong>READ-ONLY FALLBACK:</strong> The authenticated profile is unavailable (${escapeHtml(state.profileError)}). Showing demo progress only.</div>`
+    ? `<div class="alert"><strong>PROFILE NOTICE:</strong> ${escapeHtml(state.profileError)}. ${state.authenticated ? "The authenticated profile could not be refreshed." : "Showing the clearly labelled local demo profile."}</div>`
+    : !state.authenticated
+      ? `<div class="alert"><strong>DEMO PROFILE:</strong> Connect and authenticate a Devnet wallet to load and edit your real progress.</div>`
+      : "";
+  const profileEditor = state.authenticated
+    ? `<article class="card">
+        <div class="section-heading"><div><h2>Profile details</h2><p class="card-copy">These fields are cosmetic and are saved against the authenticated wallet session.</p></div><span class="status-pill">${escapeHtml(shortValue(state.wallet))}</span></div>
+        <label class="field-label" for="profile-display-name">Display name</label>
+        <input class="text-input" id="profile-display-name" maxlength="32" value="${escapeHtml(profile.display_name || "")}" placeholder="Your display name" />
+        <label class="field-label" for="profile-avatar-url">Avatar URL</label>
+        <input class="text-input" id="profile-avatar-url" maxlength="512" value="${escapeHtml(profile.avatar_url || "")}" placeholder="https://…" />
+        <div class="proof-actions"><button class="button" data-action="save-profile" ${state.profileSaving ? "disabled" : ""}>${state.profileSaving ? "SAVING…" : "SAVE PROFILE"}</button></div>
+      </article>`
     : "";
   return `
     <section class="hero">
@@ -791,6 +928,7 @@ function renderProfile() {
       <article class="card stat-card"><span class="stat-label">Record</span><span class="stat-value">${escapeHtml(profile.wins)}–${escapeHtml(profile.losses)}</span><span class="stat-subvalue">${escapeHtml(profile.draws)} draws · Season ${escapeHtml(profile.season_id || "—")}</span></article>
       <article class="card stat-card"><span class="stat-label">Unlocked</span><span class="stat-value">${achievements.length}</span><span class="stat-subvalue">Cosmetic titles only</span></article>
     </section>
+    ${profileEditor}
     <div class="section-heading"><h2>Achievements</h2><span class="muted">Evidence retained by the backend</span></div>
     ${state.profileLoading ? `<div class="empty-state">Refreshing profile history…</div>` : achievements.length ? `<section class="achievement-grid">${achievements.map((achievement) => `
       <article class="card achievement-card">
@@ -802,12 +940,40 @@ function renderProfile() {
     <div class="alert"><strong>REWARDS · COMING SOON.</strong> These titles are cosmetic. No tokens, SOL, cash, staking, or guaranteed payout is attached to an unlock.</div>`;
 }
 
+function renderLeague() {
+  const cards = state.leagues.length
+    ? state.leagues.map((league) => {
+        const membership = state.leagueMemberships[league.id];
+        const instruction = state.leagueInstructions[league.id];
+        const activeMembership = membership && membership.membership_status !== "LEFT";
+        return `<article class="card">
+          <div class="row"><div><span class="mode-label">${escapeHtml(league.status)}</span><h2>${escapeHtml(league.name)}</h2></div><span class="status-pill">${escapeHtml(league.joined_players)}/${escapeHtml(league.max_players)}</span></div>
+          <div class="source-line"><span class="domain-pill">${league.rated ? "RATED" : "UNRATED"}</span><span class="cluster-pill">${escapeHtml(league.total_rounds)} ROUNDS</span><span class="muted">Round ${escapeHtml(league.current_round)}</span></div>
+          <p class="card-copy">Registration closes at ${escapeHtml(new Date(league.registration_close_at * 1000).toISOString())}. League membership reserves the scheduled rounds for this wallet.</p>
+          <div class="hero-actions"><button class="button ${activeMembership ? "secondary" : ""}" data-action="${activeMembership ? "league-leave" : "league-join"}" data-league-id="${escapeHtml(league.id)}" ${state.leagueBusyId === league.id ? "disabled" : ""}>${state.leagueBusyId === league.id ? "WORKING…" : activeMembership ? "LEAVE LEAGUE" : "JOIN LEAGUE"}</button></div>
+          ${membership ? `<div class="alert"><strong>${escapeHtml(membership.membership_status)}:</strong> The request is recorded. The coordinator must confirm the wallet instruction before on-chain membership becomes active.</div>` : ""}
+          ${instruction ? `<div class="proof-item"><small>Wallet instruction data</small><code>${escapeHtml(shortValue(instruction.data_base58))}</code></div>` : ""}
+        </article>`;
+      }).join("")
+    : `<div class="empty-state">${state.leaguesError ? `League catalog unavailable: ${escapeHtml(state.leaguesError)}` : "No registration leagues are currently open."}</div>`;
+  return `
+    <section class="hero">
+      <p class="eyebrow">Competitive leagues · Solana Devnet</p>
+      <h1>Play a season.</h1>
+      <p class="lede">League join and leave requests are authenticated to your wallet. The backend returns the exact instruction view; on-chain membership changes only after coordinator confirmation.</p>
+    </section>
+    ${state.leaguesLoading ? `<div class="empty-state">Loading registration leagues…</div>` : `<section class="grid two">${cards}</section>`}`;
+}
+
+
 function renderView() {
   switch (state.view) {
     case "profile":
       return renderProfile();
     case "queue":
       return renderQueue();
+    case "league":
+      return renderLeague();
     case "roster":
       return renderRoster();
     case "battle":
@@ -830,6 +996,7 @@ function renderNav() {
     ["home", "HOME"],
     ["profile", "PROGRESS"],
     ["queue", "RANKED"],
+    ["league", "LEAGUES"],
     ["private", "PRIVATE"],
     ["replay", "REPLAY"],
     ["proof", "PROOF"],
@@ -871,29 +1038,103 @@ function startReplay() {
   render();
 }
 
+
+function authDomain() {
+  return window.TICKERSIX_AUTH_DOMAIN || window.location.hostname || "localhost";
+}
+
+function clearAuthenticatedState() {
+  state.wallet = null;
+  state.authenticated = false;
+  state.authExpiresAt = null;
+  state.queueEntry = null;
+  state.profile = DEMO_PROFILE;
+  state.achievements = DEMO_ACHIEVEMENTS;
+}
+
+async function restoreSession() {
+  try {
+    const profile = await api("/v1/profile/me");
+    state.wallet = profile.wallet;
+    state.authenticated = true;
+    state.profile = profile;
+    state.backendOnline = true;
+    state.achievements = await api(`/v1/profiles/${encodeURIComponent(state.wallet)}/achievements`);
+  } catch (error) {
+    clearAuthenticatedState();
+    if (error.status && error.status !== 401) state.authError = error.message;
+  }
+  render();
+}
+
 async function connectWallet() {
-  const provider = window.solana;
-  if (!provider?.connect) {
-    showToast("No wallet provider detected. Use the read-only demo flow; no signing is required for this UI demo.");
+  if (state.authBusy) return;
+  const adapter = discoverWallet(window);
+  if (!adapter) {
+    state.authError = "No Wallet Standard or compatible Solana provider was detected.";
+    showToast("Install a Devnet wallet that can sign messages, then try again.");
     return;
   }
+
+  state.authBusy = true;
+  state.authError = null;
+  state.walletAdapter = adapter;
+  render();
   try {
-    const response = await provider.connect();
-    state.wallet = response.publicKey?.toString() || "CONNECTED WALLET";
-    showToast(`Wallet connected: ${shortValue(state.wallet)}`);
-  } catch {
-    showToast("Wallet connection was cancelled. No transaction was created.");
+    const wallet = await adapter.connect();
+    const challenge = await api("/v1/auth/challenge", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ wallet, domain: authDomain() }),
+    });
+    const signature = await adapter.signMessage(challenge.message);
+    const session = await api("/v1/auth/verify", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ wallet, nonce: challenge.nonce, signature, domain: challenge.domain }),
+    });
+    state.wallet = session.wallet;
+    state.authenticated = true;
+    state.authExpiresAt = session.expires_at;
+    state.backendOnline = true;
+    await loadProfile();
+    showToast(`Wallet authenticated: ${shortValue(state.wallet)}`);
+  } catch (error) {
+    clearAuthenticatedState();
+    state.authError = error.message || "WALLET_AUTHENTICATION_FAILED";
+    showToast(`Wallet authentication failed: ${state.authError}`);
+  } finally {
+    state.authBusy = false;
+    render();
   }
 }
 
-async function joinQueue() {
-  if (!state.wallet) {
-    showToast("This static client is in read-only demo mode. Connect a wallet through the production auth flow before queueing.");
-    setView("roster");
-    return;
+async function logoutWallet() {
+  try {
+    if (state.authenticated) await api("/v1/auth/logout", { method: "POST" });
+  } catch {
+    // Local state is cleared even when the API is offline.
   }
   try {
-    await api("/v1/ranked/queue", {
+    await state.walletAdapter?.disconnect();
+  } catch {
+    // Provider disconnect is best-effort; it cannot keep the session active.
+  }
+  clearAuthenticatedState();
+  state.walletAdapter = null;
+  state.authError = null;
+  showToast("Wallet signed out.");
+}
+
+async function joinQueue() {
+  if (!state.authenticated) {
+    await connectWallet();
+    if (!state.authenticated) return;
+  }
+  state.queueBusy = true;
+  render();
+  try {
+    state.queueEntry = await api("/v1/ranked/queue", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ market_round_id: state.round.id }),
@@ -901,9 +1142,38 @@ async function joinQueue() {
     showToast("Queue admission accepted. Continue with the backend-provided Battle.");
     setView("roster");
   } catch (error) {
-    showToast(`Queue admission needs backend auth: ${error.message}`);
+    if (error.status === 401) clearAuthenticatedState();
+    showToast(`Queue admission failed: ${error.message}`);
+    render();
+  } finally {
+    state.queueBusy = false;
+    render();
   }
 }
+
+async function leaveQueue() {
+  if (!state.authenticated) {
+    showToast("Authenticate your wallet before leaving the queue.");
+    return;
+  }
+  state.queueBusy = true;
+  render();
+  try {
+    await api(`/v1/ranked/queue?market_round_id=${encodeURIComponent(state.round.id)}`, {
+      method: "DELETE",
+    });
+    state.queueEntry = null;
+    showToast("You left the ranked queue.");
+    setView("queue");
+  } catch (error) {
+    if (error.status === 401) clearAuthenticatedState();
+    showToast(`Queue exit failed: ${error.message}`);
+  } finally {
+    state.queueBusy = false;
+    render();
+  }
+}
+
 
 document.addEventListener("click", async (event) => {
   const target = event.target.closest("[data-action]");
@@ -912,6 +1182,11 @@ document.addEventListener("click", async (event) => {
   if (action === "private") {
     await loadPrivateMarkets();
     setView("private");
+    return;
+  }
+  if (action === "league") {
+    await loadLeagues();
+    setView("league");
     return;
   }
   if (action === "profile") {
@@ -936,6 +1211,26 @@ document.addEventListener("click", async (event) => {
   }
   if (action === "private-exhibition") {
     showToast("Private exhibition readiness is isolated and unrated; no Battle or Public Elo mutation is submitted by this client.");
+    return;
+  }
+  if (action === "logout") {
+    await logoutWallet();
+    return;
+  }
+  if (action === "save-profile") {
+    await updateProfile();
+    return;
+  }
+  if (action === "leave-queue") {
+    await leaveQueue();
+    return;
+  }
+  if (action === "league-join") {
+    await joinLeague(Number(target.dataset.leagueId));
+    return;
+  }
+  if (action === "league-leave") {
+    await leaveLeague(Number(target.dataset.leagueId));
     return;
   }
   if (action === "start-roster") {
@@ -990,3 +1285,4 @@ window.addEventListener("keydown", (event) => {
 
 render();
 hydrateBackend();
+restoreSession();
