@@ -1,18 +1,19 @@
 use anchor_lang::InstructionData;
 use market_data::{AttestorSigner, CanonicalPriceReport, PriceReportContext, SignedAttestorReport};
 use relay::{
-    build_create_league_rated_battle_instruction, build_create_official_league_instruction,
-    build_create_rated_battle_instruction, build_finalize_battle_instruction,
-    build_finalize_forfeit_instruction, build_finalize_jupiter_price_phase_instruction,
-    build_finalize_market_round_instruction, build_finalize_price_phase_instruction,
-    build_join_league_instruction, build_leave_league_instruction,
-    build_mark_jupiter_price_phase_unavailable_instruction,
-    build_mark_price_phase_unavailable_instruction, build_settle_side_score_instruction,
-    build_signed_legacy_relay_transaction, build_submit_price_attestation_plan,
-    build_void_battle_price_unavailable_instruction, build_void_battle_system_incident_instruction,
-    league_member_pda, league_pda, CreateOfficialLeagueAccounts, CreateRatedBattleAccounts,
+    build_commit_lineup_instruction, build_create_league_rated_battle_instruction,
+    build_create_official_league_instruction, build_create_rated_battle_instruction,
+    build_finalize_battle_instruction, build_finalize_forfeit_instruction,
+    build_finalize_jupiter_price_phase_instruction, build_finalize_market_round_instruction,
+    build_finalize_price_phase_instruction, build_join_league_instruction,
+    build_leave_league_instruction, build_mark_jupiter_price_phase_unavailable_instruction,
+    build_mark_price_phase_unavailable_instruction, build_reveal_lineup_instruction,
+    build_settle_side_score_instruction, build_signed_legacy_relay_transaction,
+    build_submit_price_attestation_plan, build_void_battle_price_unavailable_instruction,
+    build_void_battle_system_incident_instruction, league_member_pda, league_pda,
+    CommitLineupAccounts, CreateOfficialLeagueAccounts, CreateRatedBattleAccounts,
     FinalizeAccounts, LeagueMembershipAccounts, LeagueRatedBattleAccounts, RelayAccounts,
-    RelayError,
+    RelayError, RevealLineupAccounts,
 };
 use solana_address::Address;
 use solana_hash::Hash;
@@ -63,6 +64,60 @@ fn accounts() -> RelayAccounts {
         attestor_set: [12; 32],
         relayer: [13; 32],
     }
+}
+
+#[test]
+fn lineup_builders_preserve_wallet_signer_and_anchor_payload_contracts() {
+    let commitment = [7; 32];
+    let commit = build_commit_lineup_instruction(
+        CommitLineupAccounts {
+            config: [1; 32],
+            battle: [2; 32],
+            market_round: [3; 32],
+            player: [4; 32],
+        },
+        commitment,
+    );
+
+    assert_eq!(commit.accounts.len(), 4);
+    assert_eq!(commit.accounts[0].pubkey.to_bytes(), [1; 32]);
+    assert!(!commit.accounts[0].is_writable);
+    assert_eq!(commit.accounts[1].pubkey.to_bytes(), [2; 32]);
+    assert!(commit.accounts[1].is_writable);
+    assert_eq!(commit.accounts[3].pubkey.to_bytes(), [4; 32]);
+    assert!(commit.accounts[3].is_signer);
+    assert_eq!(
+        commit.data,
+        tickersix::instruction::CommitLineup { commitment }.data()
+    );
+
+    let asset_ids = [2, 7, 11, 18, 23, 31];
+    let salt = [9; 32];
+    let reveal = build_reveal_lineup_instruction(
+        RevealLineupAccounts {
+            battle: [2; 32],
+            market_round: [3; 32],
+            player: [4; 32],
+        },
+        asset_ids,
+        7,
+        salt,
+    );
+
+    assert_eq!(reveal.accounts.len(), 3);
+    assert_eq!(reveal.accounts[0].pubkey.to_bytes(), [2; 32]);
+    assert!(reveal.accounts[0].is_writable);
+    assert_eq!(reveal.accounts[2].pubkey.to_bytes(), [4; 32]);
+    assert!(reveal.accounts[2].is_signer);
+    assert_eq!(
+        reveal.data,
+        tickersix::instruction::RevealLineup {
+            asset_ids,
+            captain_asset_id: 7,
+            salt,
+        }
+        .data()
+    );
 }
 
 #[test]

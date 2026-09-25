@@ -148,6 +148,25 @@ pub struct LeagueRatedBattleAccounts {
     pub rated_slot_b: [u8; 32],
 }
 
+/// Accounts required by a wallet to commit its hidden lineup for a Battle.
+/// The player signer is supplied by the connected wallet at transaction send
+/// time; this builder never handles or stores wallet secret material.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CommitLineupAccounts {
+    pub config: [u8; 32],
+    pub battle: [u8; 32],
+    pub market_round: [u8; 32],
+    pub player: [u8; 32],
+}
+
+/// Accounts required by a wallet to reveal the lineup committed for a Battle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RevealLineupAccounts {
+    pub battle: [u8; 32],
+    pub market_round: [u8; 32],
+    pub player: [u8; 32],
+}
+
 /// The two instructions that must be adjacent in a relay transaction.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PriceRelayPlan {
@@ -429,10 +448,57 @@ pub fn build_create_rated_battle_instruction(
     }
 }
 
+/// Builds the wallet-signed hidden-lineup commitment instruction.
+///
+/// Account order and mutability mirror the Anchor CommitLineup context exactly;
+/// the program validates the Battle, round window, participant identity, and
+/// non-zero commitment when the wallet submits the transaction.
 /// Builds the coordinator instruction that creates the canonical on-chain
 /// official League account. Backend catalog data should be inserted or
 /// reconciled using the resulting League PDA only after this transaction is
 /// submitted and confirmed.
+pub fn build_commit_lineup_instruction(
+    accounts: CommitLineupAccounts,
+    commitment: [u8; 32],
+) -> Instruction {
+    Instruction {
+        program_id: address(tickersix::ID.to_bytes()),
+        accounts: vec![
+            readonly(address(accounts.config)),
+            writable(address(accounts.battle)),
+            readonly(address(accounts.market_round)),
+            signer(address(accounts.player)),
+        ],
+        data: tickersix::instruction::CommitLineup { commitment }.data(),
+    }
+}
+
+/// Builds the wallet-signed lineup reveal instruction.
+///
+/// The canonical asset order, captain, and salt are carried as Anchor arguments;
+/// the on-chain program recomputes the commitment and rejects any mismatch.
+pub fn build_reveal_lineup_instruction(
+    accounts: RevealLineupAccounts,
+    asset_ids: [u16; 6],
+    captain_asset_id: u16,
+    salt: [u8; 32],
+) -> Instruction {
+    Instruction {
+        program_id: address(tickersix::ID.to_bytes()),
+        accounts: vec![
+            writable(address(accounts.battle)),
+            readonly(address(accounts.market_round)),
+            signer(address(accounts.player)),
+        ],
+        data: tickersix::instruction::RevealLineup {
+            asset_ids,
+            captain_asset_id,
+            salt,
+        }
+        .data(),
+    }
+}
+
 pub fn build_create_official_league_instruction(
     league_id: u64,
     max_players: u16,
