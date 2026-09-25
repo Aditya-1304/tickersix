@@ -84,10 +84,10 @@ The deployed program and its IDL artifact can be checked together with the
 final readiness gate:
 
 ```bash
-scripts/submission-readiness-gate.sh
+scripts/final-submission-gate.sh
 ```
 
-The readiness gate performs local regression checks, validates the recorded
+The final submission gate requires a clean worktree, performs local regression checks, and validates the recorded
 program and IDL metadata, and verifies that the public Devnet account is
 executable and owned by the upgradeable loader. It does not send a transaction.
 

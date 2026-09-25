@@ -6,10 +6,10 @@ real users, screenshots, videos, or finalized Battles.
 
 ## Automated gate
 
-Run from the repository root:
+Run from the repository root after committing the reviewed tree:
 
 ```bash
-scripts/submission-readiness-gate.sh
+scripts/final-submission-gate.sh
 ```
 
 The gate verifies:
