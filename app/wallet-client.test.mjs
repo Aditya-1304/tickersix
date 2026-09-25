@@ -31,6 +31,36 @@ test("adapts a legacy Solana provider without exposing a private key", async () 
   await wallet.disconnect();
 });
 
+test("dispatches a prepared transaction through Wallet Standard signAndSendTransaction", async () => {
+  let received;
+  const provider = {
+    name: "Mock Transaction Wallet",
+    chains: ["solana:devnet"],
+    accounts: [{ address: WALLET }],
+    features: {
+      "solana:signMessage": {
+        async signMessage() {
+          return [{ signature: new Uint8Array([1, 2, 3]) }];
+        },
+      },
+      "solana:signAndSendTransaction": {
+        async signAndSendTransaction(input) {
+          received = input;
+          return [{ signature: new Uint8Array([4, 5, 6]) }];
+        },
+      },
+    },
+  };
+
+  const adapter = createWalletAdapter(provider);
+  assert.equal(adapter.canSendTransactions, true);
+  assert.equal(await adapter.connect(), WALLET);
+  assert.equal(await adapter.sendTransaction("AQID"), "2MJu");
+  assert.equal(received.account.address, WALLET);
+  assert.equal(received.chain, "solana:devnet");
+  assert.deepEqual([...received.transaction], [1, 2, 3]);
+});
+
 test("discovers and signs through the Wallet Standard registration event", async () => {
   const wallet = {
     name: "Mock Standard Wallet",

@@ -20,6 +20,9 @@ const requiredMarkers = [
   ["app.js", "REVIEW LINEUP"],
   ["app.js", "lineup-review"],
   ["wallet-client.js", "wallet-standard:register-wallet"],
+  ["wallet-client.js", "signAndSendTransaction"],
+  ["app.js", "/v1/battles/"],
+  ["app.js", "LINEUP LOCKED"],
 ];
 
 for (const file of requiredFiles) await readFile(new URL(`./${file}`, import.meta.url));

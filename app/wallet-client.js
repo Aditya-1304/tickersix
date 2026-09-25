@@ -2,8 +2,9 @@
  * Browser wallet boundary for TickerSix authentication.
  *
  * The backend authenticates a wallet by verifying a base58 Ed25519 signature.
- * This module contains only provider discovery, message signing, and byte
- * encoding. It never receives, derives, persists, or transmits private keys.
+ * This module contains provider discovery, message signing, transaction
+ * dispatch, and byte encoding. It never receives, derives, persists, or
+ * transmits private keys.
  * Keeping this boundary independent of the view makes the auth flow testable
  * with mocked providers and keeps the static demo free of a paid SDK/RPC.
  */
@@ -54,6 +55,12 @@ function signatureToBase58(result) {
   return encodeBase58(signature);
 }
 
+function decodeBase64(value) {
+  if (typeof value !== "string" || !value) throw new TypeError("serialized transaction must be base64");
+  const binary = globalThis.atob(value);
+  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
+}
+
 function standardChainSupported(wallet) {
   return !wallet.chains?.length || wallet.chains.includes(DEVNET_CHAIN) || wallet.chains.some((chain) => chain.startsWith("solana:"));
 }
@@ -70,8 +77,8 @@ function isStandardWallet(wallet) {
  * Creates the small provider interface consumed by the UI auth flow.
  *
  * Both legacy injected providers and Wallet Standard wallets are adapted to
- * the same connect/sign/disconnect contract. The adapter deliberately has no
- * transaction-sending method because this flow authenticates sessions only.
+ * the same connect/sign/disconnect contract. Transaction dispatch is exposed
+ * only when the provider advertises the Solana Wallet Standard capability.
  */
 export function createWalletAdapter(provider) {
   if (isStandardWallet(provider)) {
@@ -81,11 +88,23 @@ export function createWalletAdapter(provider) {
       async connect() {
         return publicKeyToAddress(provider.accounts[0].address);
       },
+      canSendTransactions: Boolean(provider.features?.["solana:signAndSendTransaction"]?.signAndSendTransaction),
       async signMessage(message) {
         const account = provider.accounts[0];
         const result = await provider.features["solana:signMessage"].signMessage({
           account,
           message: new TextEncoder().encode(message),
+        });
+        return signatureToBase58(result);
+      },
+      async sendTransaction(serializedBase64) {
+        const send = provider.features?.["solana:signAndSendTransaction"]?.signAndSendTransaction;
+        if (!send) throw new Error("WALLET_TRANSACTION_UNSUPPORTED");
+        const account = provider.accounts[0];
+        const result = await send.call(provider, {
+          account,
+          chain: DEVNET_CHAIN,
+          transaction: decodeBase64(serializedBase64),
         });
         return signatureToBase58(result);
       },
@@ -100,6 +119,7 @@ export function createWalletAdapter(provider) {
   return {
     kind: "legacy-injected",
     name: provider.name || "Injected Solana provider",
+    canSendTransactions: false,
     async connect() {
       const response = await provider.connect();
       return publicKeyToAddress(response?.publicKey || provider.publicKey);

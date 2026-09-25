@@ -4,13 +4,14 @@
  * The UI intentionally keeps network reads and local demo data behind the same
  * view model. That lets the hackathon demo run without a paid RPC, while a
  * deployed backend can provide the real round, proof, replay, and SSE data.
- * This client never signs, sends, settles, rates, or mutates achievements.
+ * This client never receives private keys; wallet providers sign and send the
+ * prepared commit transaction, while the browser only confirms its Devnet status.
  */
 
 import { validateLineup } from "./lineup.mjs";
 import { discoverWallet } from "./wallet-client.js";
 
-const API_BASE = window.TICKERSIX_API_BASE || "";
+const API_BASE = window.TICKERSIX_API_BASE || (window.location.port === "4173" ? "http://127.0.0.1:8788" : "");
 const DEMO_BATTLE = "11111111111111111111111111111111";
 
 const SOURCE_INFO = {
@@ -315,6 +316,11 @@ const state = {
   captain: null,
   assetsLoading: false,
   assetsError: null,
+  commitBusy: false,
+  commitStage: null,
+  commitSignature: null,
+  commitment: null,
+  commitError: null,
   battlePubkey: DEMO_BATTLE,
   replay: DEMO_REPLAY,
   proof: DEMO_PROOF,
@@ -763,6 +769,25 @@ function renderLineupReview() {
   const lockLabel = lockDeadline
     ? new Date(lockDeadline * 1000).toISOString()
     : "pending from the indexed Battle";
+  const canSend = Boolean(state.walletAdapter?.canSendTransactions);
+  const canLock = validation.valid && state.authenticated && canSend && !state.commitBusy && state.commitStage !== "locked";
+  const stageLabels = {
+    preparing: "Preparing commitment…",
+    waiting: "Waiting for wallet…",
+    submitting: "Submitting transaction…",
+    confirming: "Confirming on Devnet…",
+    locked: "LINEUP LOCKED ✓",
+    error: "Commit failed",
+  };
+  const stageNotice = state.commitStage
+    ? "<div class=\"alert\"><strong>" + escapeHtml(stageLabels[state.commitStage] || state.commitStage) + "</strong>" + (state.commitError ? "<br />" + escapeHtml(state.commitError) : "") + "</div>"
+    : "";
+  const transactionNotice = state.commitSignature
+    ? "<div class=\"proof-grid\"><div class=\"proof-item\"><small>Transaction</small><a href=\"https://explorer.solana.com/tx/" + encodeURIComponent(state.commitSignature) + "?cluster=devnet\" target=\"_blank\" rel=\"noreferrer\">" + escapeHtml(shortValue(state.commitSignature)) + " ↗</a></div><div class=\"proof-item\"><small>Commitment</small><code>" + escapeHtml(shortValue(state.commitment)) + "</code></div><div class=\"proof-item\"><small>Locked before</small><code>" + escapeHtml(lockLabel) + "</code></div></div>"
+    : "";
+  const capabilityNotice = state.authenticated && !canSend && state.commitStage !== "locked"
+    ? "<div class=\"alert\"><strong>TRANSACTION WALLET REQUIRED:</strong> reconnect with a Devnet wallet that supports Wallet Standard signAndSendTransaction.</div>"
+    : "";
 
   return `
     <section class="hero">
@@ -771,13 +796,16 @@ function renderLineupReview() {
       <p class="lede">This is the exact lineup that will be committed for Battle ${escapeHtml(shortValue(state.battlePubkey))}. Once locked, it cannot be changed.</p>
     </section>
     <article class="card">
-      <div class="row"><div><h2>YOUR SIX</h2><span class="muted">${lineup.length} / 6 frozen assets selected</span></div><span class="status-pill">${validation.valid ? "READY TO LOCK" : "INCOMPLETE"}</span></div>
+      <div class="row"><div><h2>YOUR SIX</h2><span class="muted">${lineup.length} / 6 frozen assets selected</span></div><span class="status-pill">${state.commitStage === "locked" ? "LINEUP LOCKED ✓" : validation.valid ? "READY TO LOCK" : "INCOMPLETE"}</span></div>
       <section class="grid three">
         ${lineup.map((asset) => `<article class="card stat-card"><span class="stat-label">${asset.id === state.captain ? "CAPTAIN · 2×" : "PICK"}</span><span class="stat-value">${escapeHtml(asset.symbol)}</span><span class="stat-subvalue">${escapeHtml(asset.name)}</span></article>`).join("")}
       </section>
       <div class="source-line"><span class="domain-pill">Round ${escapeHtml(String(state.round.round_sequence))}</span><span class="domain-pill">Lock deadline: ${escapeHtml(lockLabel)}</span><span class="domain-pill">${escapeHtml(state.round.settlement_source_kind)}</span></div>
       ${validation.valid ? "" : `<div class="alert"><strong>LINEUP NOT READY:</strong> ${escapeHtml(validation.reason)}</div>`}
-      <div class="hero-actions"><button class="button" data-action="lock-lineup" disabled>LOCK LINEUP ON SOLANA</button><button class="button secondary" data-action="roster">EDIT LINEUP</button></div>
+      ${capabilityNotice}
+      ${stageNotice}
+      ${transactionNotice}
+      <div class="hero-actions"><button class="button" data-action="lock-lineup" ${canLock ? "" : "disabled"}>${escapeHtml(state.commitStage === "locked" ? "LINEUP LOCKED ✓" : state.commitBusy ? "LOCKING…" : "LOCK LINEUP ON SOLANA")}</button><button class="button secondary" data-action="roster" ${state.commitBusy ? "disabled" : ""}>EDIT LINEUP</button></div>
     </article>`;
 }
 
@@ -1273,6 +1301,111 @@ async function joinQueue() {
   }
 }
 
+function bytesToHex(bytes) {
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function rememberCommittedLineup(salt) {
+  try {
+    sessionStorage.setItem("tickersix.lineup.commit.v1", JSON.stringify({
+      version: 1,
+      battle_pubkey: state.battlePubkey,
+      asset_ids: [...state.selectedAssets].sort((left, right) => left - right),
+      captain_asset_id: state.captain,
+      salt,
+    }));
+  } catch {
+    // Session storage is an optimization for the manual reveal path; the
+    // confirmed on-chain commitment remains the source of truth.
+  }
+}
+
+async function confirmDevnetTransaction(signature) {
+  const rpcUrl = window.TICKERSIX_SOLANA_RPC_URL || "https://api.devnet.solana.com";
+  const deadline = Date.now() + 45_000;
+  while (Date.now() < deadline) {
+    const response = await fetch(rpcUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 1,
+        method: "getSignatureStatuses",
+        params: [[signature], { searchTransactionHistory: true }],
+      }),
+    });
+    if (!response.ok) throw new Error("DEVNET_CONFIRMATION_UNAVAILABLE");
+    const payload = await response.json();
+    const status = payload?.result?.value?.[0];
+    if (status?.err) throw new Error("COMMIT_TRANSACTION_FAILED");
+    if (status?.confirmationStatus === "confirmed" || status?.confirmationStatus === "finalized") return;
+    await new Promise((resolve) => window.setTimeout(resolve, 1500));
+  }
+  throw new Error("COMMIT_CONFIRMATION_TIMEOUT");
+}
+
+async function commitLineup() {
+  if (state.commitBusy || state.commitStage === "locked") return;
+  if (!state.authenticated) {
+    await connectWallet();
+    if (!state.authenticated) return;
+  }
+  if (!state.walletAdapter?.canSendTransactions) {
+    state.commitStage = "error";
+    state.commitError = "WALLET_TRANSACTION_UNSUPPORTED";
+    showToast("Reconnect with a Devnet wallet that supports transaction sending.");
+    render();
+    return;
+  }
+  const validation = validateLineup(state.selectedAssets, state.captain, state.assets);
+  if (!validation.valid) {
+    showToast("Lineup commit failed: " + validation.reason);
+    return;
+  }
+
+  state.commitBusy = true;
+  state.commitStage = "preparing";
+  state.commitError = null;
+  state.commitSignature = null;
+  state.commitment = null;
+  render();
+  const salt = bytesToHex(crypto.getRandomValues(new Uint8Array(32)));
+  try {
+    const prepared = await api("/v1/battles/" + encodeURIComponent(state.battlePubkey) + "/lineup/prepare", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        asset_ids: [...state.selectedAssets],
+        captain_asset_id: state.captain,
+        salt,
+      }),
+    });
+    state.commitment = prepared.commitment;
+    state.round = { ...state.round, commit_deadline: prepared.commit_deadline };
+    state.commitStage = "waiting";
+    render();
+
+    state.commitStage = "submitting";
+    render();
+    const signature = await state.walletAdapter.sendTransaction(prepared.transaction.serialized_base64);
+    state.commitSignature = signature;
+    rememberCommittedLineup(salt);
+    state.commitStage = "confirming";
+    render();
+    await confirmDevnetTransaction(signature);
+    state.commitStage = "locked";
+    showToast("LINEUP LOCKED ✓ Your commitment is confirmed on Devnet.");
+  } catch (error) {
+    if (error.status === 401) clearAuthenticatedState();
+    state.commitStage = "error";
+    state.commitError = error.message || "LINEUP_COMMIT_FAILED";
+    showToast("Lineup commit failed: " + state.commitError);
+  } finally {
+    state.commitBusy = false;
+    render();
+  }
+}
+
 async function leaveQueue() {
   if (!state.authenticated) {
     showToast("Authenticate your wallet before leaving the queue.");
@@ -1368,6 +1501,10 @@ document.addEventListener("click", async (event) => {
       return;
     }
     setView("lineup-review");
+    return;
+  }
+  if (action === "lock-lineup") {
+    await commitLineup();
     return;
   }
   if (action === "build-lineup") {
