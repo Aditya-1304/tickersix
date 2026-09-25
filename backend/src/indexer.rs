@@ -16,6 +16,7 @@ use crate::{
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IndexerError {
     InvalidRound,
+    InvalidRoundAsset,
     InvalidLeague,
     InvalidLeagueMember,
     InvalidBattle,
@@ -30,6 +31,7 @@ impl fmt::Display for IndexerError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter.write_str(match self {
             Self::InvalidRound => "indexed Market Round has invalid timing",
+            Self::InvalidRoundAsset => "indexed RoundAsset has incomplete canonical identity",
             Self::InvalidLeague => "indexed League has invalid lifecycle fields",
             Self::InvalidLeagueMember => {
                 "indexed LeagueMember does not match the canonical League and wallet"
@@ -61,6 +63,24 @@ pub struct IndexedMarketRound {
     pub queue_close_at: i64,
     pub start_target_at: i64,
     pub end_target_at: i64,
+    pub indexed_at: i64,
+}
+
+/// Consumer metadata decoded from a canonical on-chain RoundAsset account.
+///
+/// The indexer stores this projection so clients can render the exact frozen
+/// MarketRound universe without inventing symbols, providers, or scoring mints.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IndexedRoundAsset {
+    pub market_round_id: i64,
+    pub round_asset_pubkey: String,
+    pub asset_id: i64,
+    pub symbol: String,
+    pub name: String,
+    pub representation: String,
+    pub provider: String,
+    pub scoring_mint: String,
+    pub status: String,
     pub indexed_at: i64,
 }
 
@@ -280,6 +300,57 @@ pub async fn upsert_market_round(
     .await
     .map_err(storage_error)?;
     row.try_get("id").map_err(storage_error)
+}
+
+pub fn validate_round_asset(asset: &IndexedRoundAsset) -> Result<(), IndexerError> {
+    if asset.market_round_id <= 0
+        || asset.round_asset_pubkey.trim().is_empty()
+        || asset.symbol.trim().is_empty()
+        || asset.name.trim().is_empty()
+        || asset.representation.trim().is_empty()
+        || asset.provider.trim().is_empty()
+        || asset.scoring_mint.trim().is_empty()
+        || asset.status.trim().is_empty()
+    {
+        return Err(IndexerError::InvalidRoundAsset);
+    }
+    Ok(())
+}
+
+pub async fn upsert_round_asset(
+    pool: &PgPool,
+    asset: &IndexedRoundAsset,
+) -> Result<(), IndexerError> {
+    validate_round_asset(asset)?;
+    sqlx::query(
+        "INSERT INTO round_assets
+            (market_round_id, round_asset_pubkey, asset_id, symbol, name,
+             representation, provider, scoring_mint, status, indexed_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+         ON CONFLICT (market_round_id, asset_id) DO UPDATE SET
+             round_asset_pubkey = EXCLUDED.round_asset_pubkey,
+             symbol = EXCLUDED.symbol,
+             name = EXCLUDED.name,
+             representation = EXCLUDED.representation,
+             provider = EXCLUDED.provider,
+             scoring_mint = EXCLUDED.scoring_mint,
+             status = EXCLUDED.status,
+             indexed_at = EXCLUDED.indexed_at",
+    )
+    .bind(asset.market_round_id)
+    .bind(&asset.round_asset_pubkey)
+    .bind(asset.asset_id)
+    .bind(&asset.symbol)
+    .bind(&asset.name)
+    .bind(&asset.representation)
+    .bind(&asset.provider)
+    .bind(&asset.scoring_mint)
+    .bind(&asset.status)
+    .bind(asset.indexed_at)
+    .execute(pool)
+    .await
+    .map_err(storage_error)?;
+    Ok(())
 }
 
 pub async fn upsert_battle(pool: &PgPool, battle: &IndexedBattle) -> Result<(), IndexerError> {
@@ -565,6 +636,32 @@ mod tests {
             queue_close_at: 100,
             start_target_at: 200,
             end_target_at: 300,
+            indexed_at: 1,
+        }
+    }
+
+    #[test]
+    fn indexer_rejects_round_asset_without_canonical_identity() {
+        let mut asset = round_asset();
+        asset.round_asset_pubkey.clear();
+
+        assert_eq!(
+            validate_round_asset(&asset),
+            Err(IndexerError::InvalidRoundAsset)
+        );
+    }
+
+    fn round_asset() -> IndexedRoundAsset {
+        IndexedRoundAsset {
+            market_round_id: 7,
+            round_asset_pubkey: "round-asset-pda".to_owned(),
+            asset_id: 11,
+            symbol: "NVDA".to_owned(),
+            name: "NVIDIA".to_owned(),
+            representation: "NVDAx".to_owned(),
+            provider: "xStocks".to_owned(),
+            scoring_mint: "scoring-mint".to_owned(),
+            status: "ELIGIBLE".to_owned(),
             indexed_at: 1,
         }
     }

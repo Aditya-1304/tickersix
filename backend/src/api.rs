@@ -90,6 +90,10 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/profile/me", get(get_my_profile).put(update_my_profile))
         .route("/v1/market-rounds/next", get(get_next_market_round))
         .route(
+            "/v1/market-rounds/{id}/assets",
+            get(get_market_round_assets),
+        )
+        .route(
             "/v1/market-rounds/{pubkey}/proof",
             get(get_market_round_proof),
         )
@@ -569,6 +573,15 @@ async fn get_next_market_round(
 ) -> Result<Json<Option<ranked::NextMarketRound>>, ApiError> {
     Ok(Json(
         ranked::next_market_round(&state.pool, auth::unix_now()).await?,
+    ))
+}
+
+async fn get_market_round_assets(
+    State(state): State<ApiState>,
+    Path(market_round_id): Path<i64>,
+) -> Result<Json<ranked::RoundAssetUniverse>, ApiError> {
+    Ok(Json(
+        ranked::list_round_assets(&state.pool, market_round_id).await?,
     ))
 }
 

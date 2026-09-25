@@ -132,6 +132,24 @@ pub struct RankedPairingStatus {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct RoundAsset {
+    pub asset_id: i64,
+    pub symbol: String,
+    pub name: String,
+    pub representation: String,
+    pub provider: String,
+    pub scoring_mint: String,
+    pub round_asset_pubkey: String,
+    pub status: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RoundAssetUniverse {
+    pub market_round_id: i64,
+    pub assets: Vec<RoundAsset>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct RankedPairingView {
     pub pairing_id: i64,
     pub player_a: String,
@@ -355,6 +373,53 @@ pub async fn ranked_status(
     let pairing = load_pairing_status(&mut transaction, market_round_id, wallet).await?;
     transaction.rollback().await.map_err(storage_error)?;
     Ok(RankedStatus { queue, pairing })
+}
+
+pub async fn list_round_assets(
+    pool: &PgPool,
+    market_round_id: i64,
+) -> Result<RoundAssetUniverse, RankedError> {
+    let round_exists = sqlx::query("SELECT 1 FROM market_rounds WHERE id = $1")
+        .bind(market_round_id)
+        .fetch_optional(pool)
+        .await
+        .map_err(storage_error)?
+        .is_some();
+    if !round_exists {
+        return Err(RankedError::RoundNotFound);
+    }
+
+    let rows = sqlx::query(
+        "SELECT asset_id, symbol, name, representation, provider,
+                scoring_mint, round_asset_pubkey, status
+         FROM round_assets
+         WHERE market_round_id = $1
+         ORDER BY asset_id ASC",
+    )
+    .bind(market_round_id)
+    .fetch_all(pool)
+    .await
+    .map_err(storage_error)?;
+    let assets = rows
+        .into_iter()
+        .map(|row| {
+            Ok(RoundAsset {
+                asset_id: row.try_get("asset_id").map_err(storage_error)?,
+                symbol: row.try_get("symbol").map_err(storage_error)?,
+                name: row.try_get("name").map_err(storage_error)?,
+                representation: row.try_get("representation").map_err(storage_error)?,
+                provider: row.try_get("provider").map_err(storage_error)?,
+                scoring_mint: row.try_get("scoring_mint").map_err(storage_error)?,
+                round_asset_pubkey: row.try_get("round_asset_pubkey").map_err(storage_error)?,
+                status: row.try_get("status").map_err(storage_error)?,
+            })
+        })
+        .collect::<Result<Vec<_>, RankedError>>()?;
+
+    Ok(RoundAssetUniverse {
+        market_round_id,
+        assets,
+    })
 }
 
 /// Runs once after the round cutoff. PostgreSQL advisory locking and the

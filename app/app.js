@@ -309,9 +309,11 @@ const DEMO_ACHIEVEMENTS = [
 const state = {
   view: "home",
   round: DEMO_ROUND,
-  assets: DEMO_ASSETS,
-  selectedAssets: new Set([1, 2, 3, 4, 5, 6]),
-  captain: 1,
+  assets: [],
+  selectedAssets: new Set(),
+  captain: null,
+  assetsLoading: false,
+  assetsError: null,
   battlePubkey: DEMO_BATTLE,
   replay: DEMO_REPLAY,
   proof: DEMO_PROOF,
@@ -725,6 +727,8 @@ function renderRoster() {
     </section>
     <article class="card">
       <div class="row"><div><h2>FROZEN PUBLIC UNIVERSE</h2><span class="muted">${selectedCount} / 6 slots selected</span></div><span class="source-pill">${escapeHtml(sourceInfo(state.round.settlement_source_kind).queue)}</span></div>
+      ${state.assetsLoading ? `<div class="empty-state">Loading the indexed RoundAsset universe…</div>` : ""}
+      ${state.assetsError ? `<div class="alert"><strong>FROZEN ASSETS UNAVAILABLE:</strong> ${escapeHtml(state.assetsError)}</div>` : ""}
       <div class="progress" aria-label="Roster selection progress"><span style="width:${Math.min(selectedCount / 6, 1) * 100}%"></span></div>
       <div class="asset-grid">
         ${state.assets
@@ -1148,6 +1152,35 @@ async function logoutWallet() {
   showToast("Wallet signed out.");
 }
 
+async function loadRoundAssets() {
+  state.assetsLoading = true;
+  state.assetsError = null;
+  state.assets = [];
+  state.selectedAssets = new Set();
+  state.captain = null;
+  render();
+  try {
+    const universe = await api(`/v1/market-rounds/${encodeURIComponent(state.round.id)}/assets`);
+    if (universe.market_round_id !== state.round.id || !Array.isArray(universe.assets)) {
+      throw new Error("ROUND_ASSET_UNIVERSE_INVALID");
+    }
+    state.assets = universe.assets.map((asset) => ({
+      ...asset,
+      id: asset.asset_id,
+    }));
+    state.backendOnline = true;
+    return state.assets.length > 0;
+  } catch (error) {
+    state.assets = [];
+    state.assetsError = error.message || "ROUND_ASSETS_UNAVAILABLE";
+    showToast(`Frozen assets unavailable: ${state.assetsError}`);
+    return false;
+  } finally {
+    state.assetsLoading = false;
+    render();
+  }
+}
+
 function stopRankedStatusPolling() {
   if (state.rankedStatusTimer) window.clearInterval(state.rankedStatusTimer);
   state.rankedStatusTimer = null;
@@ -1304,6 +1337,7 @@ document.addEventListener("click", async (event) => {
       return;
     }
     state.battlePubkey = state.pairing.battle_pubkey;
+    if (!await loadRoundAssets()) return;
     setView("roster");
     return;
   }

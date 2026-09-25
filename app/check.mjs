@@ -14,6 +14,9 @@ const requiredMarkers = [
   ["app.js", "/v1/auth/verify"],
   ["app.js", "/v1/profile/me"],
   ["app.js", "/v1/leagues"],
+  ["app.js", "/v1/ranked/status"],
+  ["app.js", "/v1/market-rounds/"],
+  ["app.js", "FROZEN PUBLIC UNIVERSE"],
   ["wallet-client.js", "wallet-standard:register-wallet"],
 ];
 
