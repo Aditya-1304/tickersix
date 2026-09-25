@@ -12,8 +12,13 @@ import { validateLineup } from "./lineup.mjs";
 import { discoverWallet } from "./wallet-client.js";
 
 const API_BASE = window.TICKERSIX_API_BASE || (window.location.port === "4173" ? "http://127.0.0.1:8788" : "");
-const APP_MODE = new URLSearchParams(window.location.search).get("mode") === "demo" ? "DEMO" : "LIVE";
+const MODE_QUERY = new URLSearchParams(window.location.search);
+const REQUESTED_MODE = (MODE_QUERY.get("mode") || "live").toUpperCase();
+const APP_MODE = ["LIVE", "REPLAY", "DEMO"].includes(REQUESTED_MODE) ? REQUESTED_MODE : "LIVE";
+const LIVE_MODE = APP_MODE === "LIVE";
+const REPLAY_MODE = APP_MODE === "REPLAY";
 const DEMO_MODE = APP_MODE === "DEMO";
+const REPLAY_BATTLE = MODE_QUERY.get("battle") || null;
 const TICKERSIX_PROGRAM_ID = window.TICKERSIX_PROGRAM_ID || "8sehrRxpnLbvpzgJx8MqB5YApZAh69z5yVvdK1Zeyj6Z";
 const SOLANA_EXPLORER_BASE = "https://explorer.solana.com";
 
@@ -338,7 +343,7 @@ const DEMO_ACHIEVEMENTS = [
 ];
 
 const state = {
-  view: "home",
+  view: REPLAY_MODE ? "replay" : "home",
   round: DEMO_MODE ? DEMO_ROUND : null,
   assets: [],
   selectedAssets: new Set(),
@@ -354,7 +359,7 @@ const state = {
   revealStage: null,
   revealSignature: null,
   revealError: null,
-  battlePubkey: DEMO_MODE ? DEMO_BATTLE : null,
+  battlePubkey: DEMO_MODE ? DEMO_BATTLE : REPLAY_MODE ? REPLAY_BATTLE : null,
   battleSnapshot: null,
   battleSnapshotError: null,
   liveBattle: null,
@@ -364,6 +369,7 @@ const state = {
   replay: DEMO_MODE ? DEMO_REPLAY : null,
   proof: DEMO_MODE ? DEMO_PROOF : null,
   proofError: null,
+  replayError: null,
   replayIndex: DEMO_MODE ? DEMO_REPLAY.events.length - 1 : 0,
   replayPlaying: false,
   replayTimer: null,
@@ -419,9 +425,11 @@ function escapeHtml(value) {
 }
 
 function renderLiveUnavailable(detail = "Live TickerSix data could not be loaded.") {
-  return `<section class="hero"><p class="eyebrow">Live mode · Solana Devnet</p><h1>LIVE DATA UNAVAILABLE</h1><p class="lede">${escapeHtml(detail)}</p><article class="card"><div class="alert"><strong>SERVICE TEMPORARILY UNAVAILABLE.</strong><br />The client will not substitute demo ratings, names, results, or transactions in live mode.</div><div class="hero-actions"><button class="button" data-action="retry-live">RETRY</button><button class="button secondary" data-action="replay">WATCH VERIFIED REPLAY</button></div></article></section>`;
+  const title = REPLAY_MODE ? "REPLAY DATA UNAVAILABLE" : "LIVE DATA UNAVAILABLE";
+  const eyebrow = REPLAY_MODE ? "Replay mode · Solana Devnet" : "Live mode · Solana Devnet";
+  const retryAction = REPLAY_MODE ? "RETRY REPLAY" : "RETRY";
+  return `<section class="hero"><p class="eyebrow">${eyebrow}</p><h1>${title}</h1><p class="lede">${escapeHtml(detail)}</p><article class="card"><div class="alert"><strong>${REPLAY_MODE ? "READ-ONLY REPLAY DATA UNAVAILABLE." : "SERVICE TEMPORARILY UNAVAILABLE."}</strong><br />The client will not substitute demo ratings, names, results, or transactions in live mode.</div><div class="hero-actions"><button class="button" data-action="${REPLAY_MODE ? "replay" : "retry-live"}">${retryAction}</button>${REPLAY_MODE ? "" : '<button class="button secondary" data-action="replay">WATCH VERIFIED REPLAY</button>'}</div></article></section>`;
 }
-
 function formatScore(value) {
   if (value === null || value === undefined) return "—";
   return `${(Number(value) / 10_000_000).toFixed(2)}%`;
@@ -460,6 +468,12 @@ async function api(path, options = {}) {
 }
 
 async function hydrateBackend() {
+  if (REPLAY_MODE) {
+    await loadReplay();
+    await loadProof();
+    render();
+    return;
+  }
   try {
     const round = await api("/v1/market-rounds/next");
     if (round) state.round = round;
@@ -470,7 +484,6 @@ async function hydrateBackend() {
   }
   await loadLeaderboard();
 }
-
 /**
  * Loads the public active-season standings and the authenticated wallet rank.
  *
@@ -601,16 +614,29 @@ function connectBattleStream() {
 }
 
 async function loadReplay() {
+  state.replayError = null;
+  if (!state.battlePubkey) {
+    state.replay = DEMO_MODE ? DEMO_REPLAY : null;
+    if (!DEMO_MODE) state.replayError = "REPLAY_BATTLE_REQUIRED";
+    state.replayIndex = state.replay?.events?.length ? state.replay.events.length - 1 : 0;
+    return null;
+  }
   try {
     const replay = await api(`/v1/battles/${state.battlePubkey}/replay`);
+    if (!replay || replay.battle_pubkey !== state.battlePubkey || !Array.isArray(replay.events) || replay.events.length === 0) {
+      throw new Error("REPLAY_RESPONSE_INCOMPLETE");
+    }
     state.replay = replay;
     state.replayIndex = replay.events.length - 1;
-  } catch {
+    state.backendOnline = true;
+    return replay;
+  } catch (error) {
     state.replay = DEMO_MODE ? DEMO_REPLAY : null;
+    state.replayError = DEMO_MODE ? null : error.message || "REPLAY_UNAVAILABLE";
     state.replayIndex = state.replay?.events?.length ? state.replay.events.length - 1 : 0;
+    return null;
   }
 }
-
 function isCompletePublicProof(proof) {
   const battle = proof?.battle;
   const assets = proof?.round_assets;
@@ -818,21 +844,23 @@ function privateStatusLabel(exhibition) {
 }
 
 function renderTopbar() {
-  const authControls = state.authenticated
-    ? `<span class="status-pill">AUTHENTICATED · ${escapeHtml(shortValue(state.wallet))}</span><button class="button ghost" data-action="logout">SIGN OUT</button>`
-    : `<button class="button ghost" data-action="connect" ${state.authBusy ? "disabled" : ""}>${state.authBusy ? "SIGNING…" : "CONNECT & AUTHENTICATE"}</button>`;
+  const modeLabel = APP_MODE === "DEMO" ? "DEMO MODE" : APP_MODE === "REPLAY" ? "REPLAY MODE" : "LIVE MODE";
+  const authControls = REPLAY_MODE
+    ? `<span class="status-pill">READ-ONLY REPLAY</span>`
+    : state.authenticated
+      ? `<span class="status-pill">AUTHENTICATED · ${escapeHtml(shortValue(state.wallet))}</span><button class="button ghost" data-action="logout">SIGN OUT</button>`
+      : `<button class="button ghost" data-action="connect" ${state.authBusy ? "disabled" : ""}>${state.authBusy ? "SIGNING…" : "CONNECT & AUTHENTICATE"}</button>`;
   return `
     <header class="topbar">
       <button class="brand" data-action="home" aria-label="Return to TickerSix home">
         <span class="brand-mark">TS</span>
         <span>TICKERSIX</span>
       </button>
-      <div class="hero-actions"><span class="cluster-pill">SOLANA DEVNET</span>${authControls}</div>
+      <div class="hero-actions"><span class="cluster-pill">SOLANA DEVNET · ${modeLabel}</span>${authControls}</div>
     </header>`;
 }
-
-
 function renderHome() {
+  if (REPLAY_MODE) return renderLiveUnavailable("This URL is a read-only replay session.");
   if (!state.round && !DEMO_MODE) {
     return renderLiveUnavailable("The next ranked MarketRound is not available from the backend.");
   }
@@ -899,6 +927,7 @@ function renderHome() {
     </article>`;
 }
 function renderQueue() {
+  if (REPLAY_MODE) return renderLiveUnavailable("Ranked play is disabled in replay mode.");
   if (!state.round && !DEMO_MODE) return renderLiveUnavailable("The ranked queue requires a published MarketRound.");
   const source = sourceInfo(state.round.settlement_source_kind);
   const hasBattle = Boolean(state.pairing?.battle_pubkey);
@@ -1207,7 +1236,7 @@ function renderProof() {
     </article>`;
 }
 function renderReplay() {
-  if (!state.replay && !DEMO_MODE) return renderLiveUnavailable("A verified replay is not available yet.");
+  if (!state.replay && !DEMO_MODE) return renderLiveUnavailable(state.replayError || "A verified replay is not available yet.");
   const current = currentReplayEvent();
   const replayPlayerA = state.battleSnapshot?.player_a?.display_name || "SIDE A";
   const replayPlayerB = state.battleSnapshot?.player_b?.display_name || "SIDE B";
@@ -1402,20 +1431,13 @@ function renderView() {
 }
 
 function renderNav() {
-  const items = [
-    ["home", "HOME"],
-    ["profile", "PROGRESS"],
-    ["queue", "RANKED"],
-    ["league", "LEAGUES"],
-    ["private", "PRIVATE"],
-    ["replay", "REPLAY"],
-    ["proof", "PROOF"],
-  ];
+  const items = REPLAY_MODE
+    ? [["replay", "REPLAY"], ["proof", "PROOF"]]
+    : [["home", "HOME"], ["profile", "PROGRESS"], ["queue", "RANKED"], ["league", "LEAGUES"], ["private", "PRIVATE"], ["replay", "REPLAY"], ["proof", "PROOF"]];
   return `<nav class="bottom-nav" aria-label="Primary navigation">${items
     .map(([view, label]) => `<button class="nav-button ${state.view === view ? "active" : ""}" data-action="${view}">${label}</button>`)
     .join("")}</nav>`;
 }
-
 function render() {
   app.innerHTML = `<div class="shell">${renderTopbar()}${renderView()}${renderNav()}</div>${state.toast ? `<div class="toast" role="status">${escapeHtml(state.toast)}</div>` : ""}`;
 }
@@ -1474,6 +1496,11 @@ function clearAuthenticatedState() {
 }
 
 async function restoreSession() {
+  if (REPLAY_MODE) {
+    state.authenticated = false;
+    render();
+    return;
+  }
   try {
     const profile = await api("/v1/profile/me");
     state.wallet = profile.wallet;
@@ -1490,6 +1517,10 @@ async function restoreSession() {
 }
 
 async function connectWallet() {
+  if (REPLAY_MODE) {
+    showToast("Replay mode is read-only.");
+    return;
+  }
   if (state.authBusy) return;
   const adapter = discoverWallet(window);
   if (!adapter) {
@@ -1615,6 +1646,10 @@ function startRankedStatusPolling() {
 }
 
 async function joinQueue() {
+  if (REPLAY_MODE) {
+    showToast("Replay mode is read-only.");
+    return;
+  }
   if (!state.authenticated) {
     await connectWallet();
     if (!state.authenticated) return;
@@ -1874,6 +1909,11 @@ document.addEventListener("click", async (event) => {
   const target = event.target.closest("[data-action]");
   if (!target) return;
   const action = target.dataset.action;
+  if (action === "retry-live") {
+    await hydrateBackend();
+    await restoreSession();
+    return;
+  }
   if (action === "private") {
     await loadPrivateMarkets();
     setView("private");
