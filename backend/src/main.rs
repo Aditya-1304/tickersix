@@ -34,6 +34,7 @@ pub mod db;
 pub mod hardening;
 pub mod indexer;
 pub mod jobs;
+pub mod jupiter_proof;
 pub mod leaderboard;
 pub mod league;
 pub mod live;
@@ -200,6 +201,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Some("sponsor-readiness-gate") => run_sponsor_readiness_gate()?,
         Some("beta-evidence-gate") => run_beta_evidence_gate()?,
         Some("release-freeze-gate") => run_release_freeze_gate()?,
+        Some("jupiter-proof-gate") => run_jupiter_proof_gate()?,
         Some("jupiter-smoke") => run_jupiter_smoke().await?,
         Some("xstocks-smoke") => run_xstocks_smoke().await?,
         Some("private-market-smoke") => run_private_market_smoke().await?,
@@ -482,6 +484,22 @@ async fn run_xstocks_smoke() -> Result<(), Box<dyn Error>> {
     let client = XStocksClient::with_base_url_and_rpc_url(base_url, solana_rpc_url)?;
     let snapshot = client.fetch_baseline(&symbol, &network).await?;
     println!("{}", serde_json::to_string_pretty(&snapshot)?);
+    Ok(())
+}
+
+/// Validates one retained Jupiter proof bundle without signing or sending a transaction.
+///
+/// The bundle gate is deliberately separate from the live provider smoke check:
+/// a fresh provider response is not settlement evidence, while a retained,
+/// reconciled proof bundle can be replayed and reviewed independently.
+fn run_jupiter_proof_gate() -> Result<(), Box<dyn Error>> {
+    let bundle_path = env::args()
+        .nth(2)
+        .ok_or("usage: cargo run -p backend -- jupiter-proof-gate <bundle.json>")?;
+    let bundle: jupiter_proof::JupiterProofBundle =
+        serde_json::from_str(&read_to_string(bundle_path)?)?;
+    let report = jupiter_proof::validate_jupiter_proof_bundle(&bundle)?;
+    println!("{}", serde_json::to_string_pretty(&report)?);
     Ok(())
 }
 
@@ -941,6 +959,7 @@ Market-data baseline gate: cargo run -p backend -- market-data-baseline-gate fix
 Sponsor readiness gate: cargo run -p backend -- sponsor-readiness-gate fixtures/market-data/sponsors
 Beta evidence gate: cargo run -p backend -- beta-evidence-gate [manifest.json]
 Release freeze gate: cargo run -p backend -- release-freeze-gate [freeze.json] [beta.json]
+Jupiter proof gate: cargo run -p backend -- jupiter-proof-gate <bundle.json>
 Live Jupiter smoke: cargo run -p backend -- jupiter-smoke <mint[,mint...]>
 Live xStocks smoke: cargo run -p backend -- xstocks-smoke SPYx Solana
 Live private-market smoke: cargo run -p backend -- private-market-smoke

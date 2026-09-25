@@ -17,7 +17,7 @@
     "recorded": false,
     "network": "devnet",
     "battle_id": "pending",
-    "evidence_path": "artifacts/release-evidence/jupiter.json",
+    "evidence_path": "artifacts/release-evidence/jupiter-proof.bundle.json",
     "transaction_signature": null
   },
   "pyth_proof": {

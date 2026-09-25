@@ -32,6 +32,7 @@ Before public submission, collect and review:
 
 - a reachable hosted app URL and a public repository URL;
 - the recorded Jupiter proof Battle and its finalized transaction signatures;
+- the validated Jupiter proof bundle and replay hash described in [jupiter-proof-round.md](jupiter-proof-round.md);
 - at least two real Battle windows and 8–20 distinct testers;
 - the Private Markets screenshot path with the separate rating-domain label;
 - the 100-player, five-round League simulation report;
