@@ -56,11 +56,14 @@ impl std::error::Error for IndexerError {}
 pub struct IndexedMarketRound {
     pub chain_pubkey: String,
     pub round_sequence: i64,
+    pub registry_version: u32,
     pub state: String,
     pub is_replay: bool,
     pub competition_domain: String,
     pub settlement_source_kind: String,
     pub queue_close_at: i64,
+    pub commit_deadline: i64,
+    pub reveal_deadline: i64,
     pub start_target_at: i64,
     pub end_target_at: i64,
     pub indexed_at: i64,
@@ -139,6 +142,11 @@ pub struct IndexedBattle {
     pub result: Option<String>,
     pub score_a_q9: Option<i64>,
     pub score_b_q9: Option<i64>,
+    /// On-chain commit status for each Battle side. The fields are optional so
+    /// older decoders can continue ingesting Battles while a newer decoder is
+    /// rolled out; preparation treats an explicit true value as committed.
+    pub player_a_committed: Option<bool>,
+    pub player_b_committed: Option<bool>,
     /// Finalized lineup, captain, return, and chain-finalization facts.
     ///
     /// This remains optional for non-played and non-rated Battles, but it is
@@ -247,7 +255,11 @@ pub fn validate_league_member(member: &IndexedLeagueMember) -> Result<(), Indexe
 }
 
 pub fn validate_market_round(round: &IndexedMarketRound) -> Result<(), IndexerError> {
-    if round.queue_close_at >= round.start_target_at || round.start_target_at >= round.end_target_at
+    if round.registry_version == 0
+        || round.queue_close_at >= round.commit_deadline
+        || round.commit_deadline >= round.reveal_deadline
+        || round.reveal_deadline >= round.start_target_at
+        || round.start_target_at >= round.end_target_at
     {
         return Err(IndexerError::InvalidRound);
     }
@@ -270,17 +282,21 @@ pub async fn upsert_market_round(
     validate_market_round(round)?;
     let row = sqlx::query(
         "INSERT INTO market_rounds
-            (chain_pubkey, round_sequence, state, is_replay,
+            (chain_pubkey, round_sequence, registry_version, state, is_replay,
              competition_domain, settlement_source_kind,
-             queue_close_at, start_target_at, end_target_at, indexed_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+             queue_close_at, commit_deadline, reveal_deadline,
+             start_target_at, end_target_at, indexed_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
          ON CONFLICT (chain_pubkey) DO UPDATE SET
              round_sequence = EXCLUDED.round_sequence,
+             registry_version = EXCLUDED.registry_version,
              state = EXCLUDED.state,
              is_replay = EXCLUDED.is_replay,
              competition_domain = EXCLUDED.competition_domain,
              settlement_source_kind = EXCLUDED.settlement_source_kind,
              queue_close_at = EXCLUDED.queue_close_at,
+             commit_deadline = EXCLUDED.commit_deadline,
+             reveal_deadline = EXCLUDED.reveal_deadline,
              start_target_at = EXCLUDED.start_target_at,
              end_target_at = EXCLUDED.end_target_at,
              indexed_at = EXCLUDED.indexed_at
@@ -288,11 +304,14 @@ pub async fn upsert_market_round(
     )
     .bind(&round.chain_pubkey)
     .bind(round.round_sequence)
+    .bind(i64::from(round.registry_version))
     .bind(&round.state)
     .bind(round.is_replay)
     .bind(&round.competition_domain)
     .bind(&round.settlement_source_kind)
     .bind(round.queue_close_at)
+    .bind(round.commit_deadline)
+    .bind(round.reveal_deadline)
     .bind(round.start_target_at)
     .bind(round.end_target_at)
     .bind(round.indexed_at)
@@ -373,8 +392,9 @@ pub async fn upsert_battle(pool: &PgPool, battle: &IndexedBattle) -> Result<(), 
         "INSERT INTO battles
             (chain_pubkey, market_round_id, mode, rated,
              settlement_source_kind, player_a, player_b, state, result,
-             score_a_q9, score_b_q9, indexed_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+             score_a_q9, score_b_q9, player_a_committed, player_b_committed,
+             indexed_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
          ON CONFLICT (chain_pubkey) DO UPDATE SET
              market_round_id = EXCLUDED.market_round_id,
              mode = EXCLUDED.mode,
@@ -388,6 +408,8 @@ pub async fn upsert_battle(pool: &PgPool, battle: &IndexedBattle) -> Result<(), 
              result = EXCLUDED.result,
              score_a_q9 = EXCLUDED.score_a_q9,
              score_b_q9 = EXCLUDED.score_b_q9,
+             player_a_committed = COALESCE(EXCLUDED.player_a_committed, battles.player_a_committed),
+             player_b_committed = COALESCE(EXCLUDED.player_b_committed, battles.player_b_committed),
              indexed_at = EXCLUDED.indexed_at
          WHERE battles.indexed_at <= EXCLUDED.indexed_at",
     )
@@ -402,6 +424,8 @@ pub async fn upsert_battle(pool: &PgPool, battle: &IndexedBattle) -> Result<(), 
     .bind(&battle.result)
     .bind(battle.score_a_q9)
     .bind(battle.score_b_q9)
+    .bind(battle.player_a_committed)
+    .bind(battle.player_b_committed)
     .bind(battle.indexed_at)
     .execute(&mut *transaction)
     .await
@@ -629,11 +653,14 @@ mod tests {
         IndexedMarketRound {
             chain_pubkey: "round".to_owned(),
             round_sequence: 1,
+            registry_version: 1,
             state: "SCHEDULED".to_owned(),
             is_replay: false,
             competition_domain: "PUBLIC_EQUITY".to_owned(),
             settlement_source_kind: "JUPITER_TOKEN_SPOT_V1".to_owned(),
             queue_close_at: 100,
+            commit_deadline: 120,
+            reveal_deadline: 160,
             start_target_at: 200,
             end_target_at: 300,
             indexed_at: 1,
@@ -726,6 +753,8 @@ mod tests {
             result: Some("PLAYER_A".to_owned()),
             score_a_q9: None,
             score_b_q9: None,
+            player_a_committed: None,
+            player_b_committed: None,
             finalized_facts: None,
             indexed_at: 10,
         };
@@ -757,6 +786,8 @@ mod tests {
             result: Some("PLAYER_A".to_owned()),
             score_a_q9: Some(48),
             score_b_q9: Some(10),
+            player_a_committed: None,
+            player_b_committed: None,
             finalized_facts: Some(IndexedBattleFacts {
                 facts_version: 1,
                 finalized_slot: 900,

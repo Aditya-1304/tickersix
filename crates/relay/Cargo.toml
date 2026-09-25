@@ -11,6 +11,7 @@ pyth-pro = ["tickersix/pyth-pro"]
 
 [dependencies]
 anchor-lang = "1.1.2"
+bincode = "1.3.3"
 market-data = { path = "../market-data" }
 solana-address = "2.7.0"
 solana-hash = "4.6.0"

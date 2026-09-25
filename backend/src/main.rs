@@ -38,6 +38,7 @@ pub mod jobs;
 pub mod jupiter_proof;
 pub mod leaderboard;
 pub mod league;
+pub mod lineup;
 pub mod live;
 pub mod metrics;
 pub mod private_markets;

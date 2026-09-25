@@ -10,16 +10,41 @@ use relay::{
     build_mark_price_phase_unavailable_instruction, build_reveal_lineup_instruction,
     build_settle_side_score_instruction, build_signed_legacy_relay_transaction,
     build_submit_price_attestation_plan, build_void_battle_price_unavailable_instruction,
-    build_void_battle_system_incident_instruction, league_member_pda, league_pda,
-    CommitLineupAccounts, CreateOfficialLeagueAccounts, CreateRatedBattleAccounts,
-    FinalizeAccounts, LeagueMembershipAccounts, LeagueRatedBattleAccounts, RelayAccounts,
-    RelayError, RevealLineupAccounts,
+    build_void_battle_system_incident_instruction, league_member_pda, league_pda, market_round_pda,
+    serialize_unsigned_legacy_transaction, CommitLineupAccounts, CreateOfficialLeagueAccounts,
+    CreateRatedBattleAccounts, FinalizeAccounts, LeagueMembershipAccounts,
+    LeagueRatedBattleAccounts, RelayAccounts, RelayError, RevealLineupAccounts,
 };
 use solana_address::Address;
 use solana_hash::Hash;
 use solana_keypair::Keypair;
 use solana_sdk_ids::ed25519_program;
 use solana_signer::Signer;
+
+#[test]
+fn unsigned_wallet_transaction_contains_one_placeholder_signature_and_the_commit_instruction() {
+    let instruction = build_commit_lineup_instruction(
+        CommitLineupAccounts {
+            config: [1; 32],
+            battle: [2; 32],
+            market_round: market_round_pda(7),
+            player: [4; 32],
+        },
+        [9; 32],
+    );
+    let bytes = serialize_unsigned_legacy_transaction(instruction, [4; 32], [8; 32]).unwrap();
+    let transaction: solana_transaction::versioned::VersionedTransaction =
+        bincode::deserialize(&bytes).unwrap();
+
+    assert_eq!(transaction.signatures.len(), 1);
+    assert_eq!(transaction.signatures[0], Default::default());
+    assert_eq!(transaction.message.header().num_required_signatures, 1);
+    assert_eq!(
+        transaction.message.static_account_keys()[0],
+        Address::from([4; 32])
+    );
+    assert_eq!(transaction.message.instructions().len(), 1);
+}
 
 fn report(phase: u8, attestor_seed: u8, price_q9: i64) -> SignedAttestorReport {
     report_for_program(phase, attestor_seed, price_q9, tickersix::ID.to_bytes())

@@ -600,6 +600,22 @@ pub fn build_leave_league_instruction(accounts: LeagueMembershipAccounts) -> Ins
     }
 }
 
+/// Returns the deployed TickerSix program identity used in protocol hashes and
+/// transaction instructions.
+pub fn tickersix_program_id() -> [u8; 32] {
+    tickersix::ID.to_bytes()
+}
+
+/// Derives the canonical MarketRound PDA for an on-chain round sequence.
+pub fn market_round_pda(round_id: u64) -> [u8; 32] {
+    AnchorPubkey::find_program_address(
+        &[tickersix::MARKET_ROUND_SEED, &round_id.to_le_bytes()],
+        &tickersix::ID,
+    )
+    .0
+    .to_bytes()
+}
+
 /// Derives the canonical Config PDA used by all player-facing League
 /// membership instructions.
 pub fn config_pda() -> [u8; 32] {
@@ -1008,6 +1024,31 @@ pub fn build_finalize_market_round_instruction(
         accounts,
         data: tickersix::instruction::FinalizeMarketRound {}.data(),
     })
+}
+
+/// Serializes an unsigned legacy transaction containing one wallet instruction.
+///
+/// The transaction contains zero-filled placeholder signatures so a Wallet
+/// Standard provider can deserialize it, replace the wallet signature, and
+/// send it. This function never receives or creates private key material.
+pub fn serialize_unsigned_legacy_transaction(
+    instruction: Instruction,
+    payer: [u8; 32],
+    recent_blockhash: [u8; 32],
+) -> Result<Vec<u8>, RelayError> {
+    let payer = address(payer);
+    let message = Message::new_with_blockhash(
+        &[instruction],
+        Some(&payer),
+        &Hash::new_from_array(recent_blockhash),
+    );
+    let signatures = vec![Default::default(); usize::from(message.header.num_required_signatures)];
+    let transaction = VersionedTransaction {
+        signatures,
+        message: VersionedMessage::Legacy(message),
+    };
+    bincode::serialize(&transaction)
+        .map_err(|error| RelayError::TransactionBuildFailed(error.to_string()))
 }
 
 /// Signs a relay plan with an in-memory relayer key and returns a legacy

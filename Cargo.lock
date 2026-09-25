@@ -742,6 +742,7 @@ version = "0.1.0"
 dependencies = [
  "aes-gcm",
  "axum",
+ "base64 0.22.1",
  "bs58",
  "ed25519-dalek 2.2.0",
  "futures-util",
@@ -750,6 +751,7 @@ dependencies = [
  "protocol",
  "rand 0.8.8",
  "relay",
+ "reqwest",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -3121,6 +3123,7 @@ name = "relay"
 version = "0.1.0"
 dependencies = [
  "anchor-lang",
+ "bincode",
  "market-data",
  "solana-address 2.7.0",
  "solana-hash 4.6.0",

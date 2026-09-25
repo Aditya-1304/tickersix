@@ -28,6 +28,7 @@ use crate::{
     db,
     leaderboard::{self, LeaderboardError},
     league::{self, LeagueError},
+    lineup::{self, LineupError},
     live::{self, LiveError},
     metrics,
     private_markets::{self, PrivateMarketsError},
@@ -47,6 +48,9 @@ pub struct ApiState {
     /// Optional local proof snapshot used by the read-only proof API.
     pub proof_snapshot_path: Option<Arc<PathBuf>>,
     pub private_markets: Arc<private_markets::PrivateMarketsService>,
+    /// Devnet RPC used only to fetch a recent blockhash for unsigned wallet
+    /// transactions. The backend never signs or submits the transaction.
+    pub solana_rpc_url: Arc<str>,
 }
 
 impl ApiState {
@@ -58,6 +62,10 @@ impl ApiState {
             web_origin: None,
             proof_snapshot_path: None,
             private_markets: Arc::new(private_markets::PrivateMarketsService::from_env()),
+            solana_rpc_url: Arc::from(
+                env::var("TICKERSIX_SOLANA_RPC_URL")
+                    .unwrap_or_else(|_| "https://api.devnet.solana.com".to_owned()),
+            ),
         }
     }
 }
@@ -70,6 +78,11 @@ impl ApiState {
 
     pub fn with_proof_snapshot_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.proof_snapshot_path = Some(Arc::new(path.into()));
+        self
+    }
+
+    pub fn with_solana_rpc_url(mut self, url: impl Into<Arc<str>>) -> Self {
+        self.solana_rpc_url = url.into();
         self
     }
 }
@@ -126,6 +139,7 @@ pub fn router(state: ApiState) -> Router {
             post(join_ranked_queue).delete(leave_ranked_queue),
         )
         .route("/v1/ranked/status", get(get_ranked_status))
+        .route("/v1/battles/{pubkey}/lineup/prepare", post(prepare_lineup))
         .route("/v1/leaderboards/global", get(get_global_leaderboard))
         .route("/v1/leaderboards/global/me", get(get_my_leaderboard))
         .route("/v1/stream/battles/{pubkey}", get(stream_battle))
@@ -216,6 +230,7 @@ pub enum ApiError {
     Profile(ProfileError),
     Proof(ProofError),
     Ranked(RankedError),
+    Lineup(LineupError),
     Replay(ReplayError),
     DomainMismatch,
 }
@@ -232,6 +247,7 @@ impl fmt::Display for ApiError {
             Self::Profile(error) => write!(formatter, "{error}"),
             Self::Proof(error) => write!(formatter, "{error}"),
             Self::Ranked(error) => write!(formatter, "{error}"),
+            Self::Lineup(error) => write!(formatter, "{error}"),
             Self::Replay(error) => write!(formatter, "{error}"),
             Self::DomainMismatch => {
                 formatter.write_str("authentication domain does not match server configuration")
@@ -336,6 +352,26 @@ impl IntoResponse for ApiError {
             }
             Self::Live(LiveError::Storage(_)) => StatusCode::INTERNAL_SERVER_ERROR,
             Self::Ranked(RankedError::Storage(_)) => StatusCode::INTERNAL_SERVER_ERROR,
+            Self::Lineup(LineupError::BattleNotFound | LineupError::RoundAssetsUnavailable) => {
+                StatusCode::NOT_FOUND
+            }
+            Self::Lineup(LineupError::NotBattleParticipant) => StatusCode::FORBIDDEN,
+            Self::Lineup(
+                LineupError::InvalidBattle
+                | LineupError::InvalidLineupSize
+                | LineupError::DuplicateAsset
+                | LineupError::AssetNotInFrozenUniverse
+                | LineupError::CaptainNotSelected
+                | LineupError::InvalidSalt
+                | LineupError::RoundMetadataUnavailable,
+            ) => StatusCode::BAD_REQUEST,
+            Self::Lineup(LineupError::CommitWindowClosed | LineupError::AlreadyCommitted) => {
+                StatusCode::CONFLICT
+            }
+            Self::Lineup(LineupError::RpcUnavailable) => StatusCode::SERVICE_UNAVAILABLE,
+            Self::Lineup(LineupError::TransactionBuildFailed | LineupError::Storage(_)) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
         };
         (
             status,
@@ -395,6 +431,12 @@ impl From<RankedError> for ApiError {
     }
 }
 
+impl From<LineupError> for ApiError {
+    fn from(error: LineupError) -> Self {
+        Self::Lineup(error)
+    }
+}
+
 impl From<ReplayError> for ApiError {
     fn from(error: ReplayError) -> Self {
         Self::Replay(error)
@@ -430,6 +472,26 @@ struct VerifyResponse {
 #[derive(Debug, Deserialize)]
 struct RankedQueueRequest {
     market_round_id: i64,
+}
+
+async fn prepare_lineup(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(battle_pubkey): Path<String>,
+    Json(request): Json<lineup::PrepareLineupRequest>,
+) -> Result<Json<lineup::PreparedLineup>, ApiError> {
+    let wallet = authenticated_wallet(&state, &headers).await?;
+    Ok(Json(
+        lineup::prepare_lineup(
+            &state.pool,
+            &state.solana_rpc_url,
+            &battle_pubkey,
+            &wallet,
+            request,
+            auth::unix_now(),
+        )
+        .await?,
+    ))
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -888,6 +950,23 @@ fn error_code(error: &ApiError) -> &'static str {
         ApiError::Ranked(RankedError::UnresolvedPreviousBattle) => "UNRESOLVED_PREVIOUS_BATTLE",
         ApiError::Ranked(RankedError::CoordinatorPlanUnavailable) => "COORDINATOR_PLAN_UNAVAILABLE",
         ApiError::Ranked(RankedError::CoordinatorConflict) => "COORDINATOR_CONFLICT",
+        ApiError::Lineup(LineupError::InvalidBattle) => "INVALID_BATTLE",
+        ApiError::Lineup(LineupError::BattleNotFound) => "BATTLE_NOT_FOUND",
+        ApiError::Lineup(LineupError::NotBattleParticipant) => "NOT_BATTLE_PARTICIPANT",
+        ApiError::Lineup(LineupError::InvalidLineupSize) => "LINEUP_REQUIRES_SIX_ASSETS",
+        ApiError::Lineup(LineupError::DuplicateAsset) => "LINEUP_ASSETS_MUST_BE_UNIQUE",
+        ApiError::Lineup(LineupError::AssetNotInFrozenUniverse) => {
+            "LINEUP_ASSET_NOT_IN_FROZEN_UNIVERSE"
+        }
+        ApiError::Lineup(LineupError::CaptainNotSelected) => "CAPTAIN_MUST_BE_SELECTED",
+        ApiError::Lineup(LineupError::InvalidSalt) => "INVALID_LINEUP_SALT",
+        ApiError::Lineup(LineupError::RoundMetadataUnavailable) => "ROUND_METADATA_UNAVAILABLE",
+        ApiError::Lineup(LineupError::RoundAssetsUnavailable) => "ROUND_ASSETS_UNAVAILABLE",
+        ApiError::Lineup(LineupError::CommitWindowClosed) => "COMMIT_WINDOW_CLOSED",
+        ApiError::Lineup(LineupError::AlreadyCommitted) => "LINEUP_ALREADY_COMMITTED",
+        ApiError::Lineup(LineupError::RpcUnavailable) => "SOLANA_RPC_UNAVAILABLE",
+        ApiError::Lineup(LineupError::TransactionBuildFailed) => "TRANSACTION_BUILD_FAILED",
+        ApiError::Lineup(LineupError::Storage(_)) => "INTERNAL_ERROR",
     }
 }
 
