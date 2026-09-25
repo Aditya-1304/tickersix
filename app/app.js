@@ -328,6 +328,10 @@ const state = {
   battlePubkey: DEMO_BATTLE,
   battleSnapshot: null,
   battleSnapshotError: null,
+  liveBattle: null,
+  battleStream: null,
+  battleStreamConnected: false,
+  battleStreamError: null,
   replay: DEMO_REPLAY,
   proof: DEMO_PROOF,
   replayIndex: DEMO_REPLAY.events.length - 1,
@@ -440,6 +444,83 @@ async function loadBattle() {
     if (error.status !== 404) showToast("Battle snapshot unavailable: " + state.battleSnapshotError);
     return null;
   }
+}
+
+function closeBattleStream() {
+  state.battleStream?.close();
+  state.battleStream = null;
+  state.battleStreamConnected = false;
+}
+
+function consumeBattleStreamEvent(event) {
+  if (!event?.data) return;
+  try {
+    const snapshot = JSON.parse(event.data);
+    state.liveBattle = snapshot;
+    state.battleStreamError = null;
+    if (state.battleSnapshot) {
+      state.battleSnapshot = {
+        ...state.battleSnapshot,
+        state: snapshot.state,
+        result: snapshot.result,
+        settlement_source_kind: snapshot.settlement_source_kind || state.battleSnapshot.settlement_source_kind,
+        projected_scores: {
+          ...state.battleSnapshot.projected_scores,
+          player_a_q9: snapshot.player_a_score_q9,
+          player_b_q9: snapshot.player_b_score_q9,
+          status: snapshot.projection_status,
+        },
+        as_of: snapshot.as_of,
+      };
+    }
+    render();
+  } catch {
+    state.battleStreamError = "BATTLE_STREAM_PAYLOAD_INVALID";
+    render();
+  }
+}
+
+/**
+ * Opens the authoritative live Battle stream. Historical replay stays on its
+ * own endpoint and never drives this state.
+ */
+function connectBattleStream() {
+  closeBattleStream();
+  if (!state.battlePubkey || typeof EventSource === "undefined") {
+    state.battleStreamError = "BATTLE_STREAM_UNAVAILABLE";
+    return;
+  }
+  state.battleStreamError = null;
+  const source = new EventSource(
+    API_BASE + "/v1/stream/battles/" + encodeURIComponent(state.battlePubkey),
+    { withCredentials: true },
+  );
+  state.battleStream = source;
+  source.onopen = () => {
+    state.battleStreamConnected = true;
+    state.battleStreamError = null;
+    render();
+  };
+  source.onmessage = consumeBattleStreamEvent;
+  for (const eventName of ["battle_state", "projected_score", "battle_finalized"]) {
+    source.addEventListener(eventName, consumeBattleStreamEvent);
+  }
+  source.addEventListener("battle_unavailable", () => {
+    state.battleStreamError = "BATTLE_STREAM_UNAVAILABLE";
+    closeBattleStream();
+    render();
+  });
+  source.addEventListener("stream_error", () => {
+    state.battleStreamError = "BATTLE_STREAM_ERROR";
+    closeBattleStream();
+    render();
+  });
+  source.onerror = () => {
+    if (source.readyState === EventSource.CLOSED) {
+      state.battleStreamError = "BATTLE_STREAM_UNAVAILABLE";
+      render();
+    }
+  };
 }
 
 async function loadReplay() {
@@ -853,34 +934,70 @@ function currentReplayEvent() {
 }
 
 function renderBattle() {
-  const event = currentReplayEvent();
-  const source = sourceInfo(event.settlement_source_kind || state.round.settlement_source_kind);
+  const snapshot = state.battleSnapshot;
+  const live = state.liveBattle;
+  if (!snapshot) {
+    return `<section class="hero"><p class="eyebrow">Live Battle</p><h1>Battle state unavailable.</h1><p class="lede">The coordinator has not published a canonical Battle snapshot for this view yet.</p><article class="card"><div class="alert">${escapeHtml(state.battleSnapshotError || "BATTLE_SNAPSHOT_UNAVAILABLE")}</div></article></section>`;
+  }
+
+  const current = live
+    ? {
+        ...snapshot,
+        state: live.state,
+        result: live.result,
+        settlement_source_kind: live.settlement_source_kind || snapshot.settlement_source_kind,
+        projected_scores: {
+          ...snapshot.projected_scores,
+          player_a_q9: live.player_a_score_q9,
+          player_b_q9: live.player_b_score_q9,
+          status: live.projection_status,
+        },
+        as_of: live.as_of,
+      }
+    : snapshot;
+  const source = current.settlement_source_kind
+    ? sourceInfo(current.settlement_source_kind)
+    : null;
+  const projectionStatus = current.projected_scores?.status || "NOT_AVAILABLE";
+  const playerA = current.player_a || {};
+  const playerB = current.player_b || {};
+  const lineup = [...state.selectedAssets]
+    .map((assetId) => state.assets.find((asset) => asset.id === assetId))
+    .filter(Boolean);
+  const captain = state.assets.find((asset) => asset.id === state.captain);
+  const streamNotice = state.battleStreamConnected
+    ? "LIVE STREAM CONNECTED"
+    : state.battleStreamError
+      ? state.battleStreamError
+      : "CONNECTING TO LIVE STREAM…";
+
   return `
     <section class="hero">
-      <p class="eyebrow">Battle 77 · Round ${escapeHtml(state.round.round_sequence)}</p>
+      <p class="eyebrow">Battle ${escapeHtml(shortValue(current.battle_pubkey))} · Round ${escapeHtml(String(current.market_round_sequence))}</p>
       <h1>Projected market battle.</h1>
       <p class="lede">Projected values are informational only. Final chain settlement wins if it differs from the live projection.</p>
     </section>
     <article class="card">
-      <div class="source-line"><span class="source-pill">${escapeHtml(event.source_label || source.projected)}</span><span class="domain-pill">PUBLIC EQUITY</span><span class="cluster-pill">SOLANA DEVNET</span></div>
+      <div class="source-line"><span class="source-pill">${escapeHtml(source?.projected || "SOURCE LABEL UNAVAILABLE")}</span><span class="domain-pill">${escapeHtml(current.mode || "MODE UNAVAILABLE")}</span><span class="cluster-pill">SOLANA DEVNET</span></div>
       <div class="scoreboard">
-        <div class="score-side"><span class="score-name">ADITYA</span><span class="score-value">${formatScore(event.player_a_score_q9)}</span></div>
+        <div class="score-side"><span class="score-name">${escapeHtml(playerA.display_name || shortValue(playerA.wallet))}</span><span class="score-value">${formatScore(current.projected_scores?.player_a_q9)}</span></div>
         <span class="versus">VS</span>
-        <div class="score-side"><span class="score-name">QUANTKID</span><span class="score-value">${formatScore(event.player_b_score_q9)}</span></div>
+        <div class="score-side"><span class="score-name">${escapeHtml(playerB.display_name || shortValue(playerB.wallet))}</span><span class="score-value">${formatScore(current.projected_scores?.player_b_q9)}</span></div>
       </div>
-      <div class="row"><span class="row-label">Battle state</span><strong>${escapeHtml(event.state)}</strong></div>
-      <div class="row"><span class="row-label">Projection status</span><strong>${escapeHtml(event.projection_status)} · NON-AUTHORITATIVE</strong></div>
+      <div class="row"><span class="row-label">Battle state</span><strong>${escapeHtml(current.state)}</strong></div>
+      <div class="row"><span class="row-label">Projection status</span><strong>${escapeHtml(projectionStatus)}${projectionStatus === "FINAL" ? "" : " · NON-AUTHORITATIVE"}</strong></div>
+      <div class="row"><span class="row-label">Live transport</span><strong>${escapeHtml(streamNotice)}</strong></div>
+      ${current.result ? `<div class="row"><span class="row-label">Result</span><strong>${escapeHtml(current.result)}</strong></div>` : ""}
       <div class="source-line"><button class="button ghost" data-action="toggle-basis">${state.basisOpen ? "HIDE" : "SHOW"} MARKET-INTEGRITY DRAWER</button></div>
       ${state.basisOpen ? `<div class="alert"><strong>COMPARISON_UNAVAILABLE.</strong> The frozen registry did not declare a comparable underlying representation with fresh observations. No basis value is displayed.</div>` : ""}
-      <div class="proof-actions"><button class="button" data-action="result">VIEW FINAL RESULT</button><button class="button secondary" data-action="replay">OPEN REPLAY</button></div>
+      <div class="proof-actions"><button class="button" data-action="result" ${projectionStatus === "FINAL" ? "" : "disabled"}>VIEW FINAL RESULT</button><button class="button secondary" data-action="replay">OPEN REPLAY</button></div>
     </article>
-    <div class="section-heading"><h2>Your lineup</h2><span class="muted">Captain: NVDA ×2</span></div>
-    <section class="grid three">${state.assets
-      .slice(0, 6)
-      .map((asset, index) => `<article class="card stat-card"><span class="stat-label">${index === 0 ? "CAPTAIN · 2×" : "PICK"}</span><span class="stat-value">${escapeHtml(asset.symbol)}</span><span class="stat-subvalue">${index === 0 ? "+3.20%" : index === 1 ? "+0.70%" : "−0.40%"}</span></article>`)
-      .join("")}</section>`;
+    <div class="section-heading"><h2>Your lineup</h2><span class="muted">Captain: ${escapeHtml(captain?.symbol || "not selected")}</span></div>
+    ${lineup.length ? `<section class="grid three">${lineup
+      .map((asset) => `<article class="card stat-card"><span class="stat-label">${asset.id === state.captain ? "CAPTAIN · 2×" : "PICK"}</span><span class="stat-value">${escapeHtml(asset.symbol)}</span><span class="stat-subvalue">${escapeHtml(asset.name)}</span></article>`)
+      .join("")}</section>` : `<article class="card"><div class="empty-state">Your selected lineup is not loaded in this browser.</div></article>`}
+    `;
 }
-
 function renderResult() {
   const source = sourceInfo(state.round.settlement_source_kind);
   return `
@@ -1133,6 +1250,14 @@ function render() {
 
 function setView(view) {
   if (state.replayPlaying && view !== "replay") stopReplay();
+  if (view === "battle") {
+    connectBattleStream();
+    void loadBattle().then(() => {
+      if (state.view === "battle") render();
+    });
+  } else {
+    closeBattleStream();
+  }
   state.view = view;
   render();
   window.scrollTo({ top: 0, behavior: "smooth" });
@@ -1530,6 +1655,8 @@ async function revealLineup() {
     await confirmDevnetTransaction(signature, "REVEAL");
     state.revealStage = "revealed";
     clearCommittedLineup();
+    await loadBattle();
+    setView("battle");
     showToast("LINEUP REVEALED ✓ Your lineup is now on Devnet.");
   } catch (error) {
     if (error.status === 401) clearAuthenticatedState();
