@@ -140,6 +140,10 @@ pub fn router(state: ApiState) -> Router {
         )
         .route("/v1/ranked/status", get(get_ranked_status))
         .route("/v1/battles/{pubkey}/lineup/prepare", post(prepare_lineup))
+        .route(
+            "/v1/battles/{pubkey}/lineup/reveal/prepare",
+            post(prepare_reveal_lineup),
+        )
         .route("/v1/leaderboards/global", get(get_global_leaderboard))
         .route("/v1/leaderboards/global/me", get(get_my_leaderboard))
         .route("/v1/stream/battles/{pubkey}", get(stream_battle))
@@ -365,9 +369,12 @@ impl IntoResponse for ApiError {
                 | LineupError::InvalidSalt
                 | LineupError::RoundMetadataUnavailable,
             ) => StatusCode::BAD_REQUEST,
-            Self::Lineup(LineupError::CommitWindowClosed | LineupError::AlreadyCommitted) => {
-                StatusCode::CONFLICT
-            }
+            Self::Lineup(
+                LineupError::CommitWindowClosed
+                | LineupError::AlreadyCommitted
+                | LineupError::RevealWindowClosed
+                | LineupError::NotCommitted,
+            ) => StatusCode::CONFLICT,
             Self::Lineup(LineupError::RpcUnavailable) => StatusCode::SERVICE_UNAVAILABLE,
             Self::Lineup(LineupError::TransactionBuildFailed | LineupError::Storage(_)) => {
                 StatusCode::INTERNAL_SERVER_ERROR
@@ -483,6 +490,26 @@ async fn prepare_lineup(
     let wallet = authenticated_wallet(&state, &headers).await?;
     Ok(Json(
         lineup::prepare_lineup(
+            &state.pool,
+            &state.solana_rpc_url,
+            &battle_pubkey,
+            &wallet,
+            request,
+            auth::unix_now(),
+        )
+        .await?,
+    ))
+}
+
+async fn prepare_reveal_lineup(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Path(battle_pubkey): Path<String>,
+    Json(request): Json<lineup::RevealLineupRequest>,
+) -> Result<Json<lineup::PreparedRevealLineup>, ApiError> {
+    let wallet = authenticated_wallet(&state, &headers).await?;
+    Ok(Json(
+        lineup::prepare_reveal_lineup(
             &state.pool,
             &state.solana_rpc_url,
             &battle_pubkey,
@@ -964,6 +991,8 @@ fn error_code(error: &ApiError) -> &'static str {
         ApiError::Lineup(LineupError::RoundAssetsUnavailable) => "ROUND_ASSETS_UNAVAILABLE",
         ApiError::Lineup(LineupError::CommitWindowClosed) => "COMMIT_WINDOW_CLOSED",
         ApiError::Lineup(LineupError::AlreadyCommitted) => "LINEUP_ALREADY_COMMITTED",
+        ApiError::Lineup(LineupError::RevealWindowClosed) => "REVEAL_WINDOW_CLOSED",
+        ApiError::Lineup(LineupError::NotCommitted) => "LINEUP_NOT_COMMITTED",
         ApiError::Lineup(LineupError::RpcUnavailable) => "SOLANA_RPC_UNAVAILABLE",
         ApiError::Lineup(LineupError::TransactionBuildFailed) => "TRANSACTION_BUILD_FAILED",
         ApiError::Lineup(LineupError::Storage(_)) => "INTERNAL_ERROR",

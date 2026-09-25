@@ -321,6 +321,10 @@ const state = {
   commitSignature: null,
   commitment: null,
   commitError: null,
+  revealBusy: false,
+  revealStage: null,
+  revealSignature: null,
+  revealError: null,
   battlePubkey: DEMO_BATTLE,
   replay: DEMO_REPLAY,
   proof: DEMO_PROOF,
@@ -770,7 +774,9 @@ function renderLineupReview() {
     ? new Date(lockDeadline * 1000).toISOString()
     : "pending from the indexed Battle";
   const canSend = Boolean(state.walletAdapter?.canSendTransactions);
-  const canLock = validation.valid && state.authenticated && canSend && !state.commitBusy && state.commitStage !== "locked";
+  const committedLineup = readCommittedLineup();
+  const canLock = validation.valid && state.authenticated && canSend && !state.commitBusy && !state.revealBusy && state.commitStage !== "locked";
+  const canReveal = state.commitStage === "locked" && Boolean(committedLineup) && state.authenticated && canSend && !state.commitBusy && !state.revealBusy && state.revealStage !== "revealed";
   const stageLabels = {
     preparing: "Preparing commitment…",
     waiting: "Waiting for wallet…",
@@ -779,8 +785,22 @@ function renderLineupReview() {
     locked: "LINEUP LOCKED ✓",
     error: "Commit failed",
   };
+  const revealStageLabels = {
+    preparing: "Preparing reveal…",
+    waiting: "Waiting for wallet…",
+    submitting: "Submitting reveal transaction…",
+    confirming: "Confirming reveal on Devnet…",
+    revealed: "LINEUP REVEALED ✓",
+    error: "Reveal failed",
+  };
   const stageNotice = state.commitStage
     ? "<div class=\"alert\"><strong>" + escapeHtml(stageLabels[state.commitStage] || state.commitStage) + "</strong>" + (state.commitError ? "<br />" + escapeHtml(state.commitError) : "") + "</div>"
+    : "";
+  const revealStageNotice = state.revealStage
+    ? "<div class=\"alert\"><strong>" + escapeHtml(revealStageLabels[state.revealStage] || state.revealStage) + "</strong>" + (state.revealError ? "<br />" + escapeHtml(state.revealError) : "") + "</div>"
+    : "";
+  const revealTransactionNotice = state.revealSignature
+    ? "<div class=\"proof-grid\"><div class=\"proof-item\"><small>Reveal transaction</small><a href=\"https://explorer.solana.com/tx/" + encodeURIComponent(state.revealSignature) + "?cluster=devnet\" target=\"_blank\" rel=\"noreferrer\">" + escapeHtml(shortValue(state.revealSignature)) + " ↗</a></div><div class=\"proof-item\"><small>Reveal deadline</small><code>" + escapeHtml(new Date((state.round.reveal_deadline || 0) * 1000).toISOString()) + "</code></div></div>"
     : "";
   const transactionNotice = state.commitSignature
     ? "<div class=\"proof-grid\"><div class=\"proof-item\"><small>Transaction</small><a href=\"https://explorer.solana.com/tx/" + encodeURIComponent(state.commitSignature) + "?cluster=devnet\" target=\"_blank\" rel=\"noreferrer\">" + escapeHtml(shortValue(state.commitSignature)) + " ↗</a></div><div class=\"proof-item\"><small>Commitment</small><code>" + escapeHtml(shortValue(state.commitment)) + "</code></div><div class=\"proof-item\"><small>Locked before</small><code>" + escapeHtml(lockLabel) + "</code></div></div>"
@@ -796,7 +816,7 @@ function renderLineupReview() {
       <p class="lede">This is the exact lineup that will be committed for Battle ${escapeHtml(shortValue(state.battlePubkey))}. Once locked, it cannot be changed.</p>
     </section>
     <article class="card">
-      <div class="row"><div><h2>YOUR SIX</h2><span class="muted">${lineup.length} / 6 frozen assets selected</span></div><span class="status-pill">${state.commitStage === "locked" ? "LINEUP LOCKED ✓" : validation.valid ? "READY TO LOCK" : "INCOMPLETE"}</span></div>
+      <div class="row"><div><h2>YOUR SIX</h2><span class="muted">${lineup.length} / 6 frozen assets selected</span></div><span class="status-pill">${state.revealStage === "revealed" ? "LINEUP REVEALED ✓" : state.commitStage === "locked" ? "LINEUP LOCKED ✓" : validation.valid ? "READY TO LOCK" : "INCOMPLETE"}</span></div>
       <section class="grid three">
         ${lineup.map((asset) => `<article class="card stat-card"><span class="stat-label">${asset.id === state.captain ? "CAPTAIN · 2×" : "PICK"}</span><span class="stat-value">${escapeHtml(asset.symbol)}</span><span class="stat-subvalue">${escapeHtml(asset.name)}</span></article>`).join("")}
       </section>
@@ -805,7 +825,9 @@ function renderLineupReview() {
       ${capabilityNotice}
       ${stageNotice}
       ${transactionNotice}
-      <div class="hero-actions"><button class="button" data-action="lock-lineup" ${canLock ? "" : "disabled"}>${escapeHtml(state.commitStage === "locked" ? "LINEUP LOCKED ✓" : state.commitBusy ? "LOCKING…" : "LOCK LINEUP ON SOLANA")}</button><button class="button secondary" data-action="roster" ${state.commitBusy ? "disabled" : ""}>EDIT LINEUP</button></div>
+      ${revealStageNotice}
+      ${revealTransactionNotice}
+      <div class="hero-actions"><button class="button" data-action="lock-lineup" ${canLock ? "" : "disabled"}>${escapeHtml(state.commitStage === "locked" ? "LINEUP LOCKED ✓" : state.commitBusy ? "LOCKING…" : "LOCK LINEUP ON SOLANA")}</button>${state.commitStage === "locked" ? `<button class="button" data-action="reveal-lineup" ${canReveal ? "" : "disabled"}>${escapeHtml(state.revealStage === "revealed" ? "LINEUP REVEALED ✓" : state.revealBusy ? "REVEALING…" : "REVEAL LINEUP")}</button>` : ""}<button class="button secondary" data-action="roster" ${(state.commitBusy || state.revealBusy || state.commitStage === "locked") ? "disabled" : ""}>EDIT LINEUP</button></div>
     </article>`;
 }
 
@@ -1226,6 +1248,7 @@ async function loadRoundAssets() {
       ...asset,
       id: asset.asset_id,
     }));
+    restoreCommittedLineup();
     state.backendOnline = true;
     return state.assets.length > 0;
   } catch (error) {
@@ -1320,7 +1343,40 @@ function rememberCommittedLineup(salt) {
   }
 }
 
-async function confirmDevnetTransaction(signature) {
+/**
+ * Reads the temporary reveal preimage only for the currently selected Battle.
+ * The salt never leaves the browser except inside the wallet-signed reveal
+ * preparation request, and it is removed after the reveal is confirmed.
+ */
+function readCommittedLineup() {
+  try {
+    const saved = JSON.parse(sessionStorage.getItem("tickersix.lineup.commit.v1") || "null");
+    if (saved?.version !== 1 || saved.battle_pubkey !== state.battlePubkey) return null;
+    if (!Array.isArray(saved.asset_ids) || saved.asset_ids.length !== 6 || typeof saved.salt !== "string") return null;
+    return saved;
+  } catch {
+    return null;
+  }
+}
+
+function restoreCommittedLineup() {
+  const saved = readCommittedLineup();
+  if (!saved) return false;
+  state.selectedAssets = new Set(saved.asset_ids.map(Number));
+  state.captain = Number(saved.captain_asset_id);
+  state.commitStage = "locked";
+  return true;
+}
+
+function clearCommittedLineup() {
+  try {
+    sessionStorage.removeItem("tickersix.lineup.commit.v1");
+  } catch {
+    // The confirmed on-chain reveal remains authoritative if storage cleanup fails.
+  }
+}
+
+async function confirmDevnetTransaction(signature, operation = "COMMIT") {
   const rpcUrl = window.TICKERSIX_SOLANA_RPC_URL || "https://api.devnet.solana.com";
   const deadline = Date.now() + 45_000;
   while (Date.now() < deadline) {
@@ -1337,11 +1393,11 @@ async function confirmDevnetTransaction(signature) {
     if (!response.ok) throw new Error("DEVNET_CONFIRMATION_UNAVAILABLE");
     const payload = await response.json();
     const status = payload?.result?.value?.[0];
-    if (status?.err) throw new Error("COMMIT_TRANSACTION_FAILED");
+    if (status?.err) throw new Error(operation + "_TRANSACTION_FAILED");
     if (status?.confirmationStatus === "confirmed" || status?.confirmationStatus === "finalized") return;
     await new Promise((resolve) => window.setTimeout(resolve, 1500));
   }
-  throw new Error("COMMIT_CONFIRMATION_TIMEOUT");
+  throw new Error(operation + "_CONFIRMATION_TIMEOUT");
 }
 
 async function commitLineup() {
@@ -1402,6 +1458,68 @@ async function commitLineup() {
     showToast("Lineup commit failed: " + state.commitError);
   } finally {
     state.commitBusy = false;
+    render();
+  }
+}
+
+async function revealLineup() {
+  if (state.revealBusy || state.revealStage === "revealed") return;
+  if (!state.authenticated) {
+    await connectWallet();
+    if (!state.authenticated) return;
+  }
+  if (!state.walletAdapter?.canSendTransactions) {
+    state.revealStage = "error";
+    state.revealError = "WALLET_TRANSACTION_UNSUPPORTED";
+    showToast("Reconnect with a Devnet wallet that supports transaction sending.");
+    render();
+    return;
+  }
+  const saved = readCommittedLineup();
+  if (!saved) {
+    state.revealStage = "error";
+    state.revealError = "COMMITTED_LINEUP_NOT_AVAILABLE";
+    showToast("The committed lineup is not available in this browser session.");
+    render();
+    return;
+  }
+
+  state.revealBusy = true;
+  state.revealStage = "preparing";
+  state.revealError = null;
+  state.revealSignature = null;
+  render();
+  try {
+    const prepared = await api("/v1/battles/" + encodeURIComponent(state.battlePubkey) + "/lineup/reveal/prepare", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        asset_ids: saved.asset_ids,
+        captain_asset_id: saved.captain_asset_id,
+        salt: saved.salt,
+      }),
+    });
+    state.round = { ...state.round, reveal_deadline: prepared.reveal_deadline };
+    state.revealStage = "waiting";
+    render();
+
+    state.revealStage = "submitting";
+    render();
+    const signature = await state.walletAdapter.sendTransaction(prepared.transaction.serialized_base64);
+    state.revealSignature = signature;
+    state.revealStage = "confirming";
+    render();
+    await confirmDevnetTransaction(signature, "REVEAL");
+    state.revealStage = "revealed";
+    clearCommittedLineup();
+    showToast("LINEUP REVEALED ✓ Your lineup is now on Devnet.");
+  } catch (error) {
+    if (error.status === 401) clearAuthenticatedState();
+    state.revealStage = "error";
+    state.revealError = error.message || "LINEUP_REVEAL_FAILED";
+    showToast("Lineup reveal failed: " + state.revealError);
+  } finally {
+    state.revealBusy = false;
     render();
   }
 }
@@ -1505,6 +1623,10 @@ document.addEventListener("click", async (event) => {
   }
   if (action === "lock-lineup") {
     await commitLineup();
+    return;
+  }
+  if (action === "reveal-lineup") {
+    await revealLineup();
     return;
   }
   if (action === "build-lineup") {

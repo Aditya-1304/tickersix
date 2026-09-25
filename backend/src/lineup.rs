@@ -10,8 +10,9 @@ use std::{collections::HashSet, fmt};
 use base64::{engine::general_purpose, Engine as _};
 use protocol::{commitment, validate_lineup, MathError, LINEUP_SIZE};
 use relay::{
-    build_commit_lineup_instruction, config_pda, market_round_pda,
+    build_commit_lineup_instruction, build_reveal_lineup_instruction, config_pda, market_round_pda,
     serialize_unsigned_legacy_transaction, tickersix_program_id, CommitLineupAccounts,
+    RevealLineupAccounts,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::{PgPool, Row};
@@ -32,6 +33,8 @@ pub enum LineupError {
     RoundAssetsUnavailable,
     CommitWindowClosed,
     AlreadyCommitted,
+    RevealWindowClosed,
+    NotCommitted,
     RpcUnavailable,
     TransactionBuildFailed,
     Storage(String),
@@ -54,6 +57,8 @@ impl fmt::Display for LineupError {
             Self::RoundAssetsUnavailable => "frozen RoundAsset universe is unavailable",
             Self::CommitWindowClosed => "Battle is not in the commit window",
             Self::AlreadyCommitted => "wallet already has a lineup commitment for this Battle",
+            Self::RevealWindowClosed => "Battle is not in the reveal window",
+            Self::NotCommitted => "wallet must commit a lineup before it can reveal",
             Self::RpcUnavailable => "Solana devnet RPC did not provide a recent blockhash",
             Self::TransactionBuildFailed => "wallet transaction could not be constructed",
             Self::Storage(_) => "lineup preparation storage operation failed",
@@ -83,6 +88,22 @@ pub struct PreparedLineup {
 #[derive(Debug, Serialize)]
 pub struct PreparedTransaction {
     pub serialized_base64: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RevealLineupRequest {
+    pub asset_ids: Vec<u16>,
+    pub captain_asset_id: u16,
+    pub salt: String,
+}
+
+#[derive(Debug, Serialize)]
+pub struct PreparedRevealLineup {
+    pub battle_pubkey: String,
+    pub canonical_asset_ids: Vec<u16>,
+    pub captain_asset_id: u16,
+    pub reveal_deadline: i64,
+    pub transaction: PreparedTransaction,
 }
 
 #[derive(Debug)]
@@ -123,6 +144,34 @@ fn validate_request(request: PrepareLineupRequest) -> Result<ValidatedLineup, Li
         canonical_asset_ids: canonical_asset_ids.to_vec(),
         captain_asset_id: request.captain_asset_id,
         salt,
+    })
+}
+
+/// Validates the indexed reveal window at both boundary timestamps.
+/// The chain remains authoritative, but rejecting stale preparation requests here
+/// prevents the browser from presenting a transaction that cannot be accepted.
+fn validate_reveal_window(
+    round_state: &str,
+    commit_deadline: i64,
+    reveal_deadline: i64,
+    now: i64,
+) -> Result<(), LineupError> {
+    if round_state != "REVEAL_OPEN"
+        || commit_deadline <= 0
+        || reveal_deadline < commit_deadline
+        || now < commit_deadline
+        || now > reveal_deadline
+    {
+        return Err(LineupError::RevealWindowClosed);
+    }
+    Ok(())
+}
+
+fn validate_reveal_request(request: RevealLineupRequest) -> Result<ValidatedLineup, LineupError> {
+    validate_request(PrepareLineupRequest {
+        asset_ids: request.asset_ids,
+        captain_asset_id: request.captain_asset_id,
+        salt: request.salt,
     })
 }
 
@@ -276,6 +325,132 @@ pub async fn prepare_lineup(
     })
 }
 
+/// Prepares the wallet-owned RevealLineup transaction after checking the
+/// authenticated participant, prior commitment, frozen asset universe, and
+/// indexed reveal window. The browser still signs and submits the transaction.
+pub async fn prepare_reveal_lineup(
+    pool: &PgPool,
+    solana_rpc_url: &str,
+    battle_pubkey: &str,
+    wallet: &str,
+    request: RevealLineupRequest,
+    now: i64,
+) -> Result<PreparedRevealLineup, LineupError> {
+    let battle = parse_wallet(battle_pubkey).map_err(|_| LineupError::InvalidBattle)?;
+    let wallet_bytes = parse_wallet(wallet).map_err(|_| LineupError::NotBattleParticipant)?;
+    let validated = validate_reveal_request(request)?;
+
+    let row = sqlx::query(
+        "SELECT b.market_round_id, b.player_a, b.player_b, b.state, b.result,
+                b.player_a_committed, b.player_b_committed,
+                r.chain_pubkey AS market_round_pubkey, r.round_sequence,
+                r.state AS round_state, r.registry_version,
+                r.commit_deadline, r.reveal_deadline
+         FROM battles b
+         JOIN market_rounds r ON r.id = b.market_round_id
+         WHERE b.chain_pubkey = $1",
+    )
+    .bind(battle_pubkey)
+    .fetch_optional(pool)
+    .await
+    .map_err(storage_error)?
+    .ok_or(LineupError::BattleNotFound)?;
+
+    let player_a: String = row.try_get("player_a").map_err(storage_error)?;
+    let player_b: String = row.try_get("player_b").map_err(storage_error)?;
+    let player_a_bytes = parse_wallet(&player_a).map_err(|_| LineupError::InvalidBattle)?;
+    let player_b_bytes = parse_wallet(&player_b).map_err(|_| LineupError::InvalidBattle)?;
+    let committed = if player_a_bytes == wallet_bytes {
+        row.try_get::<bool, _>("player_a_committed")
+            .map_err(storage_error)?
+    } else if player_b_bytes == wallet_bytes {
+        row.try_get::<bool, _>("player_b_committed")
+            .map_err(storage_error)?
+    } else {
+        return Err(LineupError::NotBattleParticipant);
+    };
+    if !committed {
+        return Err(LineupError::NotCommitted);
+    }
+
+    let round_state: String = row.try_get("round_state").map_err(storage_error)?;
+    let commit_deadline: i64 = row.try_get("commit_deadline").map_err(storage_error)?;
+    let reveal_deadline: i64 = row.try_get("reveal_deadline").map_err(storage_error)?;
+    validate_reveal_window(&round_state, commit_deadline, reveal_deadline, now)?;
+
+    let result: Option<String> = row.try_get("result").map_err(storage_error)?;
+    let battle_state: String = row.try_get("state").map_err(storage_error)?;
+    if result.is_some() || matches!(battle_state.as_str(), "FINALIZED" | "SETTLED" | "VOIDED") {
+        return Err(LineupError::RevealWindowClosed);
+    }
+
+    let registry_version: i64 = row.try_get("registry_version").map_err(storage_error)?;
+    let round_sequence: i64 = row.try_get("round_sequence").map_err(storage_error)?;
+    if registry_version <= 0 || registry_version > i64::from(u32::MAX) || round_sequence <= 0 {
+        return Err(LineupError::RoundMetadataUnavailable);
+    }
+
+    let market_round_pubkey: String = row.try_get("market_round_pubkey").map_err(storage_error)?;
+    let market_round =
+        parse_wallet(&market_round_pubkey).map_err(|_| LineupError::RoundMetadataUnavailable)?;
+    let expected_market_round = market_round_pda(
+        u64::try_from(round_sequence).map_err(|_| LineupError::RoundMetadataUnavailable)?,
+    );
+    if market_round != expected_market_round {
+        return Err(LineupError::RoundMetadataUnavailable);
+    }
+
+    let market_round_id: i64 = row.try_get("market_round_id").map_err(storage_error)?;
+    let asset_rows = sqlx::query(
+        "SELECT asset_id FROM round_assets
+         WHERE market_round_id = $1
+         ORDER BY asset_id ASC",
+    )
+    .bind(market_round_id)
+    .fetch_all(pool)
+    .await
+    .map_err(storage_error)?;
+    if asset_rows.is_empty() {
+        return Err(LineupError::RoundAssetsUnavailable);
+    }
+    let frozen_assets = asset_rows
+        .into_iter()
+        .map(|asset| asset.try_get::<i64, _>("asset_id").map_err(storage_error))
+        .collect::<Result<Vec<_>, _>>()?;
+    if validated
+        .asset_ids
+        .iter()
+        .any(|asset_id| !frozen_assets.contains(&i64::from(*asset_id)))
+    {
+        return Err(LineupError::AssetNotInFrozenUniverse);
+    }
+
+    let recent_blockhash = fetch_recent_blockhash(solana_rpc_url).await?;
+    let instruction = build_reveal_lineup_instruction(
+        RevealLineupAccounts {
+            battle,
+            market_round,
+            player: wallet_bytes,
+        },
+        validated.asset_ids,
+        validated.captain_asset_id,
+        validated.salt,
+    );
+    let serialized =
+        serialize_unsigned_legacy_transaction(instruction, wallet_bytes, recent_blockhash)
+            .map_err(|_| LineupError::TransactionBuildFailed)?;
+
+    Ok(PreparedRevealLineup {
+        battle_pubkey: battle_pubkey.to_owned(),
+        canonical_asset_ids: validated.canonical_asset_ids,
+        captain_asset_id: validated.captain_asset_id,
+        reveal_deadline,
+        transaction: PreparedTransaction {
+            serialized_base64: general_purpose::STANDARD.encode(serialized),
+        },
+    })
+}
+
 async fn fetch_recent_blockhash(solana_rpc_url: &str) -> Result<[u8; 32], LineupError> {
     #[derive(Serialize)]
     struct RpcRequest {
@@ -376,5 +551,19 @@ mod tests {
         })
         .unwrap_err();
         assert_eq!(error, LineupError::CaptainNotSelected);
+    }
+
+    #[test]
+    fn reveal_window_rejects_transactions_outside_the_authoritative_window() {
+        assert_eq!(
+            validate_reveal_window("REVEAL_OPEN", 100, 200, 99),
+            Err(LineupError::RevealWindowClosed)
+        );
+        assert_eq!(
+            validate_reveal_window("REVEAL_OPEN", 100, 200, 201),
+            Err(LineupError::RevealWindowClosed)
+        );
+        assert_eq!(validate_reveal_window("REVEAL_OPEN", 100, 200, 100), Ok(()));
+        assert_eq!(validate_reveal_window("REVEAL_OPEN", 100, 200, 200), Ok(()));
     }
 }
