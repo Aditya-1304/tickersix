@@ -81,7 +81,7 @@ impl fmt::Display for RankedError {
 
 impl std::error::Error for RankedError {}
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct NextMarketRound {
     pub id: i64,
     pub chain_pubkey: Option<String>,
@@ -191,7 +191,7 @@ pub async fn next_market_round(
     pool: &PgPool,
     now: i64,
 ) -> Result<Option<NextMarketRound>, RankedError> {
-    let row = sqlx::query(
+    let rows = sqlx::query(
         "SELECT id, chain_pubkey, round_sequence, state, is_replay,
                 competition_domain, settlement_source_kind,
                 queue_close_at, start_target_at, end_target_at
@@ -200,15 +200,14 @@ pub async fn next_market_round(
            AND is_replay = FALSE
            AND competition_domain = 'PUBLIC_EQUITY'
            AND queue_close_at > $1
-         ORDER BY start_target_at ASC, round_sequence ASC
-         LIMIT 1",
+         ORDER BY start_target_at ASC, round_sequence ASC",
     )
     .bind(now)
-    .fetch_optional(pool)
+    .fetch_all(pool)
     .await
     .map_err(storage_error)?;
 
-    row.map(|row| market_round_from_row(&row)).transpose()
+    first_discoverable_round(rows.into_iter().map(|row| market_round_from_row(&row)))
 }
 
 pub async fn join_queue(
@@ -918,6 +917,25 @@ fn validate_market_round_identity(
     Ok(())
 }
 
+/// Selects the earliest usable round while quarantining malformed projections.
+///
+/// A bad historical row must not hide a later canonical round, but storage
+/// failures remain fatal because silently ignoring them could conceal a broken
+/// database connection or schema.
+fn first_discoverable_round<I>(candidates: I) -> Result<Option<NextMarketRound>, RankedError>
+where
+    I: IntoIterator<Item = Result<NextMarketRound, RankedError>>,
+{
+    for candidate in candidates {
+        match candidate {
+            Ok(round) => return Ok(Some(round)),
+            Err(RankedError::InvalidRound) | Err(RankedError::RoundNotEligible) => continue,
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(None)
+}
+
 fn validate_matchmaker_window(round: &NextMarketRound, now: i64) -> Result<(), RankedError> {
     validate_public_ranked_metadata(round)?;
     if round.queue_close_at >= round.start_target_at || round.start_target_at >= round.end_target_at
@@ -1515,6 +1533,38 @@ mod tests {
             validate_market_round_identity(0, Some(&expected)),
             Err(RankedError::InvalidRound)
         );
+    }
+
+    #[test]
+    fn discovery_skips_an_invalid_projection_before_a_valid_round() {
+        let valid = NextMarketRound {
+            id: 8,
+            chain_pubkey: Some("canonical-round".to_owned()),
+            round_sequence: 8,
+            state: "SCHEDULED".to_owned(),
+            is_replay: false,
+            competition_domain: PUBLIC_EQUITY_DOMAIN.to_owned(),
+            settlement_source_kind: JUPITER_SOURCE_KIND.to_owned(),
+            source_trust_label: JUPITER_QUEUE_TRUST_LABEL,
+            network: SOLANA_DEVNET_NETWORK,
+            queue_close_at: 100,
+            start_target_at: 200,
+            end_target_at: 300,
+        };
+
+        let selected =
+            first_discoverable_round(vec![Err(RankedError::InvalidRound), Ok(valid.clone())])
+                .expect("a valid later projection should remain discoverable");
+        assert_eq!(selected, Some(valid));
+    }
+
+    #[test]
+    fn discovery_propagates_storage_failures() {
+        let error = first_discoverable_round(vec![Err(RankedError::Storage(
+            "database unavailable".to_owned(),
+        ))])
+        .unwrap_err();
+        assert_eq!(error, RankedError::Storage("database unavailable".to_owned()));
     }
 
     #[test]
