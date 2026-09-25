@@ -7,6 +7,7 @@
 
 use std::{
     collections::BTreeSet,
+    fs,
     path::{Component, Path},
 };
 
@@ -397,6 +398,73 @@ pub fn validate_beta_evidence(manifest: &BetaEvidenceManifest) -> BetaEvidenceRe
         release_ready,
         checks,
     }
+}
+
+/// Verifies that an evidence-mode manifest points to real, scoped operator
+/// artifacts. Contract mode intentionally skips this check so the checked-in
+/// fixture remains a schema contract rather than pretending that external
+/// sessions or screenshots exist.
+pub fn validate_beta_evidence_artifacts(
+    manifest: &BetaEvidenceManifest,
+    repository_root: impl AsRef<Path>,
+) -> Result<(), String> {
+    if manifest.mode != EVIDENCE_MODE {
+        return Ok(());
+    }
+    let root = fs::canonicalize(repository_root.as_ref())
+        .map_err(|error| format!("evidence root cannot be resolved: {error}"))?;
+    let mut paths = BTreeSet::new();
+    paths.extend(
+        manifest
+            .battle_windows
+            .iter()
+            .map(|window| window.evidence_path.as_str()),
+    );
+    paths.insert(manifest.jupiter_proof.evidence_path.as_str());
+    if let Some(pyth) = manifest.pyth_proof.as_ref().filter(|proof| proof.enabled) {
+        paths.insert(pyth.evidence_path.as_str());
+    }
+    paths.extend(
+        manifest
+            .private_market_demo
+            .screenshot_paths
+            .iter()
+            .map(String::as_str),
+    );
+    paths.insert(manifest.league_simulation.evidence_path.as_str());
+
+    for relative in paths {
+        if !valid_artifact_path(relative) {
+            return Err(format!(
+                "evidence path is outside the release artifact scope: {relative}"
+            ));
+        }
+        if relative.split('/').any(|component| {
+            let component = component.to_ascii_lowercase();
+            component.contains("secret")
+                || component.contains("seed")
+                || component.contains("private-key")
+        }) {
+            return Err(format!(
+                "evidence path has a sensitive component: {relative}"
+            ));
+        }
+        let candidate = root.join(relative);
+        let canonical = fs::canonicalize(&candidate).map_err(|error| {
+            format!("required evidence artifact is missing: {relative}: {error}")
+        })?;
+        if !canonical.starts_with(&root) {
+            return Err(format!(
+                "evidence artifact escapes the repository root: {relative}"
+            ));
+        }
+        if !canonical.is_file() {
+            return Err(format!(
+                "required evidence artifact is not a file: {relative}"
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn record_check(
@@ -812,6 +880,13 @@ mod tests {
         assert!(report.contract_valid);
         assert!(report.release_ready);
         assert!(report.checks.iter().all(|check| check.passed));
+    }
+
+    #[test]
+    fn evidence_mode_requires_referenced_artifacts_to_exist() {
+        let error = validate_beta_evidence_artifacts(&manifest(EVIDENCE_MODE), "/tmp").unwrap_err();
+
+        assert!(error.contains("required evidence artifact is missing"));
     }
 
     #[test]

@@ -406,6 +406,10 @@ fn run_beta_evidence_gate() -> Result<(), Box<dyn Error>> {
     if !contract_valid {
         return Err("beta-evidence contract is invalid".into());
     }
+    if manifest.mode == release_evidence::EVIDENCE_MODE {
+        let evidence_root = env::var("TICKERSIX_EVIDENCE_ROOT").unwrap_or_else(|_| ".".to_owned());
+        release_evidence::validate_beta_evidence_artifacts(&manifest, evidence_root)?;
+    }
     if manifest.mode == release_evidence::EVIDENCE_MODE && !release_ready {
         return Err("beta evidence is incomplete".into());
     }

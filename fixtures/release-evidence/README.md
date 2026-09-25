@@ -14,6 +14,8 @@ For a real beta run, create an operator-owned evidence record with
 cargo run -p backend -- beta-evidence-gate path/to/beta-evidence.json
 ```
 
+For evidence mode, the command also verifies that every referenced Battle record, Jupiter proof bundle, screenshot, and League report exists as a regular file under `artifacts/release-evidence/`. Run it from the repository root, or set `TICKERSIX_EVIDENCE_ROOT` to the repository root explicitly. Disabled Pyth does not require an artifact.
+
 The command exits successfully for the checked-in contract fixture. An
 `evidence` record exits successfully only when it contains two recorded Battle
 windows, 8-20 distinct testers, a Jupiter Devnet proof transaction, the
