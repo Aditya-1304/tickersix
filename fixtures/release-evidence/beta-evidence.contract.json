@@ -32,8 +32,24 @@
   "private_market_demo": {
     "recorded": false,
     "screenshot_paths": [
-      "artifacts/release-evidence/private-market.png"
+      "artifacts/release-evidence/private-navigation.png",
+      "artifacts/release-evidence/openai-tessera-representation.png",
+      "artifacts/release-evidence/kalshi-tessera-representation.png",
+      "artifacts/release-evidence/prestocks-representation.png",
+      "artifacts/release-evidence/comparison-unavailable.png",
+      "artifacts/release-evidence/rated-no-isolation.png"
     ],
+    "screenshot_kinds": [
+      "private_navigation",
+      "openai_tessera_representation",
+      "kalshi_tessera_representation",
+      "prestocks_representation",
+      "comparison_unavailable",
+      "rated_no_isolation"
+    ],
+    "usable_reference_asset_count": 6,
+    "comparison_unavailable_recorded": true,
+    "rating_isolation_recorded": true,
     "separate_public_ranked_domain": true,
     "public_elo_mutated": false
   },

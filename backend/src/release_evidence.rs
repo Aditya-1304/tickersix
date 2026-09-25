@@ -24,6 +24,15 @@ pub const JUPITER_SOURCE_KIND: &str = "JUPITER_TOKEN_SPOT_V1";
 pub const PYTH_SOURCE_KIND: &str = "PYTH_PRO_VERIFIED_V1";
 pub const CONTRACT_MODE: &str = "contract";
 pub const EVIDENCE_MODE: &str = "evidence";
+pub const REQUIRED_PRIVATE_MARKET_REFERENCES: usize = 6;
+pub const REQUIRED_PRIVATE_MARKET_SCREENSHOT_KINDS: &[&str] = &[
+    "private_navigation",
+    "openai_tessera_representation",
+    "kalshi_tessera_representation",
+    "prestocks_representation",
+    "comparison_unavailable",
+    "rated_no_isolation",
+];
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct BetaEvidenceManifest {
@@ -88,6 +97,14 @@ pub struct PythProofEvidence {
 pub struct PrivateMarketDemoEvidence {
     pub recorded: bool,
     pub screenshot_paths: Vec<String>,
+    #[serde(default)]
+    pub screenshot_kinds: Vec<String>,
+    #[serde(default)]
+    pub usable_reference_asset_count: usize,
+    #[serde(default)]
+    pub comparison_unavailable_recorded: bool,
+    #[serde(default)]
+    pub rating_isolation_recorded: bool,
     pub separate_public_ranked_domain: bool,
     pub public_elo_mutated: bool,
 }
@@ -320,9 +337,25 @@ pub fn validate_beta_evidence(manifest: &BetaEvidenceManifest) -> BetaEvidenceRe
             .to_owned(),
     );
 
+    let screenshot_kinds = manifest
+        .private_market_demo
+        .screenshot_kinds
+        .iter()
+        .map(|kind| kind.trim())
+        .collect::<BTreeSet<_>>();
+    let required_screenshot_kinds = REQUIRED_PRIVATE_MARKET_SCREENSHOT_KINDS
+        .iter()
+        .copied()
+        .collect::<BTreeSet<_>>();
     let private_demo_shape_valid = manifest.private_market_demo.separate_public_ranked_domain
         && !manifest.private_market_demo.public_elo_mutated
-        && !manifest.private_market_demo.screenshot_paths.is_empty()
+        && manifest.private_market_demo.usable_reference_asset_count
+            >= REQUIRED_PRIVATE_MARKET_REFERENCES
+        && manifest.private_market_demo.comparison_unavailable_recorded
+        && manifest.private_market_demo.rating_isolation_recorded
+        && screenshot_kinds == required_screenshot_kinds
+        && manifest.private_market_demo.screenshot_paths.len()
+            == REQUIRED_PRIVATE_MARKET_SCREENSHOT_KINDS.len()
         && manifest
             .private_market_demo
             .screenshot_paths
@@ -846,7 +879,17 @@ mod tests {
             }),
             private_market_demo: PrivateMarketDemoEvidence {
                 recorded: evidence,
-                screenshot_paths: vec!["artifacts/release-evidence/private-market.png".to_owned()],
+                screenshot_paths: REQUIRED_PRIVATE_MARKET_SCREENSHOT_KINDS
+                    .iter()
+                    .map(|kind| format!("artifacts/release-evidence/{kind}.png"))
+                    .collect(),
+                screenshot_kinds: REQUIRED_PRIVATE_MARKET_SCREENSHOT_KINDS
+                    .iter()
+                    .map(|kind| (*kind).to_owned())
+                    .collect(),
+                usable_reference_asset_count: REQUIRED_PRIVATE_MARKET_REFERENCES,
+                comparison_unavailable_recorded: true,
+                rating_isolation_recorded: true,
                 separate_public_ranked_domain: true,
                 public_elo_mutated: false,
             },
@@ -906,6 +949,20 @@ mod tests {
             .checks
             .iter()
             .any(|check| check.name == "optional_pyth_proof" && !check.passed));
+    }
+
+    #[test]
+    fn private_market_evidence_requires_six_usable_references() {
+        let mut evidence = manifest(EVIDENCE_MODE);
+        evidence.private_market_demo.usable_reference_asset_count = 5;
+
+        let report = validate_beta_evidence(&evidence);
+
+        assert!(!report.release_ready);
+        assert!(report
+            .checks
+            .iter()
+            .any(|check| check.name == "private_market_demo_shape" && !check.passed));
     }
 
     #[test]
