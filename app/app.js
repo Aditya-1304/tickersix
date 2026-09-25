@@ -12,6 +12,8 @@ import { validateLineup } from "./lineup.mjs";
 import { discoverWallet } from "./wallet-client.js";
 
 const API_BASE = window.TICKERSIX_API_BASE || (window.location.port === "4173" ? "http://127.0.0.1:8788" : "");
+const APP_MODE = new URLSearchParams(window.location.search).get("mode") === "demo" ? "DEMO" : "LIVE";
+const DEMO_MODE = APP_MODE === "DEMO";
 const DEMO_BATTLE = "11111111111111111111111111111111";
 
 const SOURCE_INFO = {
@@ -310,7 +312,7 @@ const DEMO_ACHIEVEMENTS = [
 
 const state = {
   view: "home",
-  round: DEMO_ROUND,
+  round: DEMO_MODE ? DEMO_ROUND : null,
   assets: [],
   selectedAssets: new Set(),
   captain: null,
@@ -325,16 +327,16 @@ const state = {
   revealStage: null,
   revealSignature: null,
   revealError: null,
-  battlePubkey: DEMO_BATTLE,
+  battlePubkey: DEMO_MODE ? DEMO_BATTLE : null,
   battleSnapshot: null,
   battleSnapshotError: null,
   liveBattle: null,
   battleStream: null,
   battleStreamConnected: false,
   battleStreamError: null,
-  replay: DEMO_REPLAY,
-  proof: DEMO_PROOF,
-  replayIndex: DEMO_REPLAY.events.length - 1,
+  replay: DEMO_MODE ? DEMO_REPLAY : null,
+  proof: DEMO_MODE ? DEMO_PROOF : null,
+  replayIndex: DEMO_MODE ? DEMO_REPLAY.events.length - 1 : 0,
   replayPlaying: false,
   replayTimer: null,
   wallet: null,
@@ -358,13 +360,13 @@ const state = {
   backendOnline: false,
   toast: null,
   basisOpen: false,
-  privateMarkets: DEMO_PRIVATE_MARKETS,
+  privateMarkets: DEMO_MODE ? DEMO_PRIVATE_MARKETS : null,
   privateMarketsError: null,
   privateMarketsLoading: false,
   privateAssetDetail: null,
   privateComparison: null,
-  profile: DEMO_PROFILE,
-  achievements: DEMO_ACHIEVEMENTS,
+  profile: DEMO_MODE ? DEMO_PROFILE : null,
+  achievements: DEMO_MODE ? DEMO_ACHIEVEMENTS : [],
   profileError: null,
   profileLoading: false,
 };
@@ -382,6 +384,10 @@ function escapeHtml(value) {
     .replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;")
     .replaceAll("'", "&#039;");
+}
+
+function renderLiveUnavailable(detail = "Live TickerSix data could not be loaded.") {
+  return `<section class="hero"><p class="eyebrow">Live mode · Solana Devnet</p><h1>LIVE DATA UNAVAILABLE</h1><p class="lede">${escapeHtml(detail)}</p><article class="card"><div class="alert"><strong>SERVICE TEMPORARILY UNAVAILABLE.</strong><br />The client will not substitute demo ratings, names, results, or transactions in live mode.</div><div class="hero-actions"><button class="button" data-action="retry-live">RETRY</button><button class="button secondary" data-action="replay">WATCH VERIFIED REPLAY</button></div></article></section>`;
 }
 
 function formatScore(value) {
@@ -428,6 +434,7 @@ async function hydrateBackend() {
     state.backendOnline = true;
   } catch {
     state.backendOnline = false;
+    if (!DEMO_MODE) state.round = null;
   }
 }
 
@@ -529,8 +536,8 @@ async function loadReplay() {
     state.replay = replay;
     state.replayIndex = replay.events.length - 1;
   } catch {
-    state.replay = DEMO_REPLAY;
-    state.replayIndex = DEMO_REPLAY.events.length - 1;
+    state.replay = DEMO_MODE ? DEMO_REPLAY : null;
+    state.replayIndex = state.replay?.events?.length ? state.replay.events.length - 1 : 0;
   }
 }
 
@@ -538,7 +545,7 @@ async function loadProof() {
   try {
     state.proof = await api(`/v1/battles/${state.battlePubkey}/proof`);
   } catch {
-    state.proof = DEMO_PROOF;
+    state.proof = DEMO_MODE ? DEMO_PROOF : null;
   }
 }
 
@@ -552,7 +559,7 @@ async function loadPrivateMarkets() {
     state.privateMarkets = await api("/v1/private-markets/assets");
     state.backendOnline = true;
   } catch (error) {
-    state.privateMarkets = DEMO_PRIVATE_MARKETS;
+    state.privateMarkets = DEMO_MODE ? DEMO_PRIVATE_MARKETS : null;
     state.privateMarketsError = error.message || "PRIVATE_MARKETS_UNAVAILABLE";
   } finally {
     state.privateMarketsLoading = false;
@@ -565,8 +572,8 @@ async function loadProfile() {
   state.profileError = null;
   render();
   if (!state.authenticated) {
-    state.profile = DEMO_PROFILE;
-    state.achievements = DEMO_ACHIEVEMENTS;
+    state.profile = DEMO_MODE ? DEMO_PROFILE : null;
+    state.achievements = DEMO_MODE ? DEMO_ACHIEVEMENTS : [];
     state.profileLoading = false;
     render();
     return;
@@ -580,8 +587,8 @@ async function loadProfile() {
     state.backendOnline = true;
   } catch (error) {
     if (error.status === 401) clearAuthenticatedState();
-    state.profile = DEMO_PROFILE;
-    state.achievements = DEMO_ACHIEVEMENTS;
+    state.profile = DEMO_MODE ? DEMO_PROFILE : null;
+    state.achievements = DEMO_MODE ? DEMO_ACHIEVEMENTS : [];
     state.profileError = error.message || "PROFILE_UNAVAILABLE";
   } finally {
     state.profileLoading = false;
@@ -689,7 +696,7 @@ async function loadPrivateAsset(assetId) {
       `/v1/private-markets/comparisons/${encodeURIComponent(assetId)}`,
     );
   } catch (error) {
-    state.privateAssetDetail = DEMO_PRIVATE_DETAILS[assetId] || null;
+    state.privateAssetDetail = DEMO_MODE ? DEMO_PRIVATE_DETAILS[assetId] || null : null;
     state.privateComparison = state.privateAssetDetail
       ? {
           asset_id: assetId,
@@ -732,7 +739,18 @@ function renderTopbar() {
 
 
 function renderHome() {
+  if (!state.round && !DEMO_MODE) {
+    return renderLiveUnavailable("The next ranked MarketRound is not available from the backend.");
+  }
   const source = sourceInfo(state.round.settlement_source_kind);
+  const profileRating = state.profile?.rating ?? "—";
+  const profileRatingDetail = state.profile ? "Current authenticated profile" : "Connect a wallet for your profile";
+  const leaderboardRank = state.myLeaderboardEntry?.rank ?? "—";
+  const placement = state.profile?.placement_complete ? "Leaderboard eligible" : "Placement status unavailable";
+  const recentBattle = state.battleSnapshot;
+  const recentBattleLabel = recentBattle ? shortValue(recentBattle.battle_pubkey) : "No live Battle selected";
+  const recentBattleRound = recentBattle ? String(recentBattle.market_round_sequence) : "—";
+  const recentResult = recentBattle?.result || "—";
   return `
     <section class="hero">
       <p class="eyebrow">Stocklana · Public market battles</p>
@@ -763,22 +781,22 @@ function renderHome() {
       </article>
     </section>
 
-    <div class="section-heading"><h2>Your Public Progress</h2><span class="muted">Season 1</span></div>
+    <div class="section-heading"><h2>Your Public Progress</h2><span class="muted">Server-derived</span></div>
     <section class="grid three">
-      <article class="card stat-card"><span class="stat-label">Rating</span><span class="stat-value">Gold · 1584</span><span class="stat-subvalue">+17 this season</span></article>
-      <article class="card stat-card"><span class="stat-label">Global rank</span><span class="stat-value">#42</span><span class="stat-subvalue">PUBLIC EQUITY · SEASON 1</span></article>
-      <article class="card stat-card"><span class="stat-label">Placement</span><span class="stat-value">5 / 5</span><span class="stat-subvalue">Leaderboard eligible</span></article>
+      <article class="card stat-card"><span class="stat-label">Rating</span><span class="stat-value">${escapeHtml(profileRating)}</span><span class="stat-subvalue">${escapeHtml(profileRatingDetail)}</span></article>
+      <article class="card stat-card"><span class="stat-label">Global rank</span><span class="stat-value">${escapeHtml(leaderboardRank)}</span><span class="stat-subvalue">PUBLIC EQUITY · ACTIVE SEASON</span></article>
+      <article class="card stat-card"><span class="stat-label">Placement</span><span class="stat-value">${escapeHtml(placement)}</span><span class="stat-subvalue">Loaded from the authenticated profile</span></article>
     </section>
 
     <div class="section-heading"><h2>Recent Battle</h2><button class="button ghost" data-action="replay">OPEN REPLAY</button></div>
     <article class="card">
-      <div class="row"><div><h3>Stocklana Open · Battle 77</h3><span class="muted">Round 12 · finalized on Devnet</span></div><span class="source-pill final">FINAL</span></div>
-      <div class="source-line"><span class="source-pill final">${escapeHtml(state.replay.settlement_label)}</span><span class="domain-pill">PUBLIC EQUITY</span></div>
-      <div class="row"><span class="row-label">Result</span><strong>YOU WIN · +17 Elo</strong></div>
+      <div class="row"><div><h3>${escapeHtml(recentBattleLabel)}</h3><span class="muted">Round ${escapeHtml(recentBattleRound)} · server projection</span></div><span class="source-pill ${recentBattle?.result ? "final" : ""}">${escapeHtml(recentBattle?.result ? "FINAL" : "NOT LOADED")}</span></div>
+      <div class="source-line"><span class="source-pill">${escapeHtml(recentBattle?.settlement_source_kind ? sourceInfo(recentBattle.settlement_source_kind).projected : "SOURCE LABEL UNAVAILABLE")}</span><span class="domain-pill">PUBLIC EQUITY</span></div>
+      <div class="row"><span class="row-label">Result</span><strong>${escapeHtml(recentResult)}</strong></div>
     </article>`;
 }
-
 function renderQueue() {
+  if (!state.round && !DEMO_MODE) return renderLiveUnavailable("The ranked queue requires a published MarketRound.");
   const source = sourceInfo(state.round.settlement_source_kind);
   const hasBattle = Boolean(state.pairing?.battle_pubkey);
   const hasPairing = Boolean(state.pairing);
@@ -813,8 +831,8 @@ function renderQueue() {
       <div class="row"><div><h2>NEXT PUBLIC RANKED ROUND</h2><span class="muted">Round ${escapeHtml(state.round.round_sequence)} · frozen public-equity universe</span></div><span class="status-pill">${queueLabel}</span></div>
       <div class="source-line"><span class="source-pill">${escapeHtml(source.queue)}</span><span class="domain-pill">${escapeHtml(state.round.competition_domain)}</span><span class="cluster-pill">${escapeHtml(state.round.network)}</span></div>
       <div class="grid two">
-        <div><div class="row"><span class="row-label">Round</span><strong>12:00–16:00 UTC</strong></div><div class="row"><span class="row-label">Queue closes</span><strong>11:45 UTC</strong></div></div>
-        <div><div class="row"><span class="row-label">Lineups lock</span><strong>11:55 UTC</strong></div><div class="row"><span class="row-label">Rating</span><strong>Gold · 1584</strong></div></div>
+        <div><div class="row"><span class="row-label">Round window</span><strong>${escapeHtml(new Date(state.round.start_target_at * 1000).toISOString())} → ${escapeHtml(new Date(state.round.end_target_at * 1000).toISOString())}</strong></div><div class="row"><span class="row-label">Queue closes</span><strong>${escapeHtml(new Date(state.round.queue_close_at * 1000).toISOString())}</strong></div></div>
+        <div><div class="row"><span class="row-label">Lineups lock</span><strong>Published by Battle</strong></div><div class="row"><span class="row-label">Rating</span><strong>${escapeHtml(state.profile?.rating ?? "—")}</strong></div></div>
       </div>
       <div class="alert"><strong>Source transparency:</strong> the provider and settlement source are frozen before queue admission. You cannot choose a different provider after freeze.</div>
       <div class="alert"><strong>Session:</strong> ${authStatus}</div>
@@ -999,28 +1017,43 @@ function renderBattle() {
     `;
 }
 function renderResult() {
-  const source = sourceInfo(state.round.settlement_source_kind);
+  const battle = state.battleSnapshot;
+  const proofBattle = state.proof?.battle;
+  if (!battle && !proofBattle && !DEMO_MODE) {
+    return renderLiveUnavailable("A finalized server result is not available for this Battle.");
+  }
+  const result = battle?.result || proofBattle?.result || "PENDING";
+  const battlePubkey = battle?.battle_pubkey || proofBattle?.battle_pubkey || state.battlePubkey || "—";
+  const roundSequence = battle?.market_round_sequence || battle?.market_round_id || proofBattle?.market_round_id || "—";
+  const scoreA = battle?.projected_scores?.player_a_q9 ?? proofBattle?.side_a_score_q9;
+  const scoreB = battle?.projected_scores?.player_b_q9 ?? proofBattle?.side_b_score_q9;
+  const source = battle?.settlement_source_kind
+    ? sourceInfo(battle.settlement_source_kind)
+    : null;
   return `
     <section class="hero">
-      <p class="eyebrow">Battle 77 · Result</p>
-      <h1>You win.</h1>
-      <p class="lede">The authoritative source-specific settlement is complete. This result is the only one eligible for Public Ranked effects.</p>
+      <p class="eyebrow">Battle ${escapeHtml(shortValue(battlePubkey))} · Result</p>
+      <h1>Server-derived Battle result.</h1>
+      <p class="lede">This view is rendered only from the canonical Battle snapshot or retained proof. No local competitive outcome is substituted.</p>
     </section>
     <article class="card">
-      <div class="source-line"><span class="source-pill final">${escapeHtml(source.final)}</span><span class="cluster-pill">SOLANA DEVNET</span></div>
+      <div class="source-line"><span class="source-pill final">${escapeHtml(source?.final || "SETTLEMENT LABEL UNAVAILABLE")}</span><span class="cluster-pill">SOLANA DEVNET</span></div>
       <div class="grid three">
-        <div class="stat-card"><span class="stat-label">Rating delta</span><span class="stat-value">+17 Elo</span><span class="stat-subvalue">1584 → 1601</span></div>
-        <div class="stat-card"><span class="stat-label">Global rank</span><span class="stat-value">#42 → #37</span><span class="stat-subvalue">PUBLIC EQUITY · SEASON 1</span></div>
-        <div class="stat-card"><span class="stat-label">Settlement</span><span class="stat-value">FINAL</span><span class="stat-subvalue">Round 12</span></div>
+        <div class="stat-card"><span class="stat-label">Result</span><span class="stat-value">${escapeHtml(result)}</span><span class="stat-subvalue">Round ${escapeHtml(roundSequence)}</span></div>
+        <div class="stat-card"><span class="stat-label">Player A score</span><span class="stat-value">${escapeHtml(formatScore(scoreA))}</span><span class="stat-subvalue">Server projection/final score</span></div>
+        <div class="stat-card"><span class="stat-label">Player B score</span><span class="stat-value">${escapeHtml(formatScore(scoreB))}</span><span class="stat-subvalue">Server projection/final score</span></div>
       </div>
       <div class="proof-actions"><button class="button" data-action="proof">VIEW PROOF</button><button class="button secondary" data-action="replay">REPLAY ROUND</button><button class="button ghost" data-action="queue">NEXT ROUND</button></div>
     </article>`;
 }
-
 function renderProof() {
-  const proof = state.proof;
-  const battle = proof.battle || DEMO_PROOF.battle;
-  const round = proof.market_round || DEMO_PROOF.market_round;
+  if (!state.proof && !DEMO_MODE) return renderLiveUnavailable("Verified proof is not available for this Battle yet.");
+  const proof = state.proof || (DEMO_MODE ? DEMO_PROOF : null);
+  const battle = proof?.battle || null;
+  const round = proof?.market_round || null;
+  if (!proof || !battle || !round) {
+    return renderLiveUnavailable("Verified proof is incomplete for this Battle.");
+  }
   return `
     <section class="hero">
       <p class="eyebrow">Source-specific proof</p>
@@ -1046,7 +1079,10 @@ function renderProof() {
 }
 
 function renderReplay() {
+  if (!state.replay && !DEMO_MODE) return renderLiveUnavailable("A verified replay is not available yet.");
   const current = currentReplayEvent();
+  const replayPlayerA = state.battleSnapshot?.player_a?.display_name || "SIDE A";
+  const replayPlayerB = state.battleSnapshot?.player_b?.display_name || "SIDE B";
   const progress = state.replay.events.length ? ((state.replayIndex + 1) / state.replay.events.length) * 100 : 0;
   return `
     <section class="hero">
@@ -1060,9 +1096,9 @@ function renderReplay() {
       <div class="row"><span class="row-label">Current replay state</span><strong>${escapeHtml(current.state)} · ${escapeHtml(current.projection_status)}</strong></div>
       <div class="row"><span class="row-label">Source label</span><strong>${escapeHtml(current.source_label || "SOURCE LABEL UNAVAILABLE")}</strong></div>
       <div class="scoreboard">
-        <div class="score-side"><span class="score-name">ADITYA</span><span class="score-value">${formatScore(current.player_a_score_q9)}</span></div>
+        <div class="score-side"><span class="score-name">${escapeHtml(replayPlayerA)}</span><span class="score-value">${formatScore(current.player_a_score_q9)}</span></div>
         <span class="versus">VS</span>
-        <div class="score-side"><span class="score-name">QUANTKID</span><span class="score-value">${formatScore(current.player_b_score_q9)}</span></div>
+        <div class="score-side"><span class="score-name">${escapeHtml(replayPlayerB)}</span><span class="score-value">${formatScore(current.player_b_score_q9)}</span></div>
       </div>
       <div class="progress"><span style="width:${progress}%"></span></div>
       <div class="timeline">${state.replay.events
@@ -1091,8 +1127,15 @@ function renderPrivateRepresentation(representation) {
 }
 
 function renderPrivate() {
+  if (!state.privateMarkets && !DEMO_MODE) return renderLiveUnavailable("Private-market metadata is not available from the backend.");
   const catalog = state.privateMarkets || DEMO_PRIVATE_MARKETS;
-  const exhibition = catalog.exhibition || DEMO_PRIVATE_MARKETS.exhibition;
+  const exhibition = catalog.exhibition || (DEMO_MODE ? DEMO_PRIVATE_MARKETS.exhibition : {
+    eligible: false,
+    status: "UNAVAILABLE",
+    reason: "EXHIBITION_METADATA_UNAVAILABLE",
+    usable_reference_asset_count: 0,
+    minimum_reference_asset_count: 6,
+  });
   const assets = catalog.assets || [];
   const detail = state.privateAssetDetail;
   const comparison = state.privateComparison;
@@ -1135,6 +1178,7 @@ function renderPrivate() {
 }
 
 function renderProfile() {
+  if (!state.profile && !DEMO_MODE) return renderLiveUnavailable("Connect and authenticate a Devnet wallet to load your real progress.");
   const profile = state.profile || DEMO_PROFILE;
   const achievements = state.achievements || [];
   const errorNotice = state.profileError
@@ -1296,8 +1340,8 @@ function clearAuthenticatedState() {
   state.authExpiresAt = null;
   state.queueEntry = null;
   state.pairing = null;
-  state.profile = DEMO_PROFILE;
-  state.achievements = DEMO_ACHIEVEMENTS;
+  state.profile = DEMO_MODE ? DEMO_PROFILE : null;
+  state.achievements = DEMO_MODE ? DEMO_ACHIEVEMENTS : [];
 }
 
 async function restoreSession() {
@@ -1715,7 +1759,12 @@ document.addEventListener("click", async (event) => {
     return;
   }
   if (action === "home" || action === "queue" || action === "roster" || action === "result" || action === "proof") {
-    if (action === "proof") await loadProof();
+    if (action === "result") {
+      await loadBattle();
+      await loadProof();
+    } else if (action === "proof") {
+      await loadProof();
+    }
     setView(action === "home" ? "home" : action);
     return;
   }

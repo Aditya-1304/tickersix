@@ -23,6 +23,8 @@ const requiredMarkers = [
   ["wallet-client.js", "signAndSendTransaction"],
   ["app.js", "/v1/battles/"],
   ["app.js", "async function loadBattle()"],
+  ["app.js", "const APP_MODE"],
+  ["app.js", "LIVE DATA UNAVAILABLE"],
   ["app.js", "function connectBattleStream()"],
   ["app.js", "new EventSource"],
   ["app.js", "liveBattle"],
