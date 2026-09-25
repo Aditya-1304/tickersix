@@ -117,6 +117,21 @@ pub struct QueueEntry {
 }
 
 #[derive(Debug, Clone, Serialize)]
+pub struct RankedStatus {
+    pub queue: QueueEntry,
+    pub pairing: Option<RankedPairingStatus>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RankedPairingStatus {
+    pub pairing_id: i64,
+    pub opponent: String,
+    pub opponent_rating: i32,
+    pub status: String,
+    pub battle_pubkey: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
 pub struct RankedPairingView {
     pub pairing_id: i64,
     pub player_a: String,
@@ -322,6 +337,24 @@ pub async fn queue_status(
     let entry = load_queue_entry(&mut transaction, market_round_id, wallet).await?;
     transaction.rollback().await.map_err(storage_error)?;
     Ok(entry)
+}
+
+/// Returns the queue row together with the authenticated wallet latest pairing.
+///
+/// The pairing is resolved relative to wallet so the client never has to infer
+/// which stored player is the opponent. A pairing is only exposed for this round;
+/// callers cannot use the endpoint to discover unrelated players matches.
+pub async fn ranked_status(
+    pool: &PgPool,
+    wallet: &str,
+    market_round_id: i64,
+) -> Result<RankedStatus, RankedError> {
+    parse_wallet(wallet).map_err(|_| RankedError::InvalidWallet)?;
+    let mut transaction = pool.begin().await.map_err(storage_error)?;
+    let queue = load_queue_entry(&mut transaction, market_round_id, wallet).await?;
+    let pairing = load_pairing_status(&mut transaction, market_round_id, wallet).await?;
+    transaction.rollback().await.map_err(storage_error)?;
+    Ok(RankedStatus { queue, pairing })
 }
 
 /// Runs once after the round cutoff. PostgreSQL advisory locking and the
@@ -901,6 +934,66 @@ async fn load_queue_entry(
     })
 }
 
+async fn load_pairing_status(
+    transaction: &mut Transaction<'_, Postgres>,
+    market_round_id: i64,
+    wallet: &str,
+) -> Result<Option<RankedPairingStatus>, RankedError> {
+    let row = sqlx::query(
+        "SELECT id, player_a, player_b, rating_a_snapshot, rating_b_snapshot,
+                battle_pubkey, status
+         FROM ranked_pairings
+         WHERE market_round_id = $1
+           AND (player_a = $2 OR player_b = $2)
+         ORDER BY id DESC
+         LIMIT 1",
+    )
+    .bind(market_round_id)
+    .bind(wallet)
+    .fetch_optional(&mut **transaction)
+    .await
+    .map_err(storage_error)?;
+
+    let pairing = row
+        .map(|row| {
+            Ok(RankedPairingView {
+                pairing_id: row.try_get("id").map_err(storage_error)?,
+                player_a: row.try_get("player_a").map_err(storage_error)?,
+                player_b: row.try_get("player_b").map_err(storage_error)?,
+                rating_a_snapshot: row.try_get("rating_a_snapshot").map_err(storage_error)?,
+                rating_b_snapshot: row.try_get("rating_b_snapshot").map_err(storage_error)?,
+                battle_pubkey: row.try_get("battle_pubkey").map_err(storage_error)?,
+                status: row.try_get("status").map_err(storage_error)?,
+            })
+        })
+        .transpose()?;
+
+    Ok(pairing
+        .as_ref()
+        .and_then(|pairing| pairing_status_for_wallet(pairing, wallet)))
+}
+
+fn pairing_status_for_wallet(
+    pairing: &RankedPairingView,
+    wallet: &str,
+) -> Option<RankedPairingStatus> {
+    let (opponent, opponent_rating) = if pairing.player_a == wallet {
+        (pairing.player_b.clone(), pairing.rating_b_snapshot)
+    } else if pairing.player_b == wallet {
+        (pairing.player_a.clone(), pairing.rating_a_snapshot)
+    } else {
+        return None;
+    };
+
+    Some(RankedPairingStatus {
+        pairing_id: pairing.pairing_id,
+        opponent,
+        opponent_rating,
+        status: pairing.status.clone(),
+        battle_pubkey: pairing.battle_pubkey.clone(),
+    })
+}
+
 /// Reconstructs the canonical active-season rating at the immutable pairing
 /// cutoff. A delayed worker must not let a later rating event change a frozen
 /// match decision, so both the event sequence and durable event timestamp are
@@ -1231,6 +1324,28 @@ mod tests {
         assert_eq!(PAIRING_POLICY_VERSION, 1);
         assert_eq!(RATING_FORMULA_VERSION, 1);
         assert_eq!(RECENT_REMATCH_WINDOW, 5);
+    }
+    #[test]
+    fn ranked_status_resolves_the_opponent_relative_to_the_authenticated_wallet() {
+        let pairing = RankedPairingView {
+            pairing_id: 44,
+            player_a: "player-a".to_owned(),
+            player_b: "player-b".to_owned(),
+            rating_a_snapshot: 1584,
+            rating_b_snapshot: 1602,
+            battle_pubkey: Some("battle-pda".to_owned()),
+            status: "CREATED".to_owned(),
+        };
+
+        let status = pairing_status_for_wallet(&pairing, "player-b")
+            .expect("a pairing containing the authenticated wallet must be visible");
+
+        assert_eq!(status.pairing_id, 44);
+        assert_eq!(status.opponent, "player-a");
+        assert_eq!(status.opponent_rating, 1584);
+        assert_eq!(status.status, "CREATED");
+        assert_eq!(status.battle_pubkey.as_deref(), Some("battle-pda"));
+        assert!(pairing_status_for_wallet(&pairing, "unrelated-player").is_none());
     }
 
     #[test]

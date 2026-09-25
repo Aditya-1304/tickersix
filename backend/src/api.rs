@@ -725,11 +725,11 @@ async fn get_ranked_status(
     State(state): State<ApiState>,
     headers: HeaderMap,
     Query(query): Query<RankedStatusQuery>,
-) -> Result<Json<ranked::QueueEntry>, ApiError> {
+) -> Result<Json<ranked::RankedStatus>, ApiError> {
     let wallet = authenticated_wallet(&state, &headers).await?;
     let market_round_id = query.market_round_id.ok_or(RankedError::RoundNotFound)?;
     Ok(Json(
-        ranked::queue_status(&state.pool, &wallet, market_round_id).await?,
+        ranked::ranked_status(&state.pool, &wallet, market_round_id).await?,
     ))
 }
 

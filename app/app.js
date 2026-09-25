@@ -325,6 +325,9 @@ const state = {
   authBusy: false,
   authError: null,
   queueEntry: null,
+  pairing: null,
+  rankedStatusTimer: null,
+  rankedStatusPollInFlight: false,
   leagues: [],
   leagueMemberships: {},
   leagueInstructions: {},
@@ -666,13 +669,29 @@ function renderHome() {
 
 function renderQueue() {
   const source = sourceInfo(state.round.settlement_source_kind);
-  const action = state.queueEntry
-    ? `<button class="button secondary" data-action="leave-queue" ${state.queueBusy ? "disabled" : ""}>${state.queueBusy ? "LEAVING…" : "LEAVE QUEUE"}</button>`
-    : `<button class="button" data-action="start-roster" ${state.queueBusy ? "disabled" : ""}>${state.queueBusy ? "JOINING…" : "JOIN QUEUE"}</button>`;
+  const hasBattle = Boolean(state.pairing?.battle_pubkey);
+  const hasPairing = Boolean(state.pairing);
+  const queueLabel = hasBattle
+    ? "MATCH FOUND"
+    : hasPairing
+      ? "OPPONENT FOUND"
+      : state.queueEntry
+        ? "SEARCHING"
+        : "SCHEDULED";
+  const action = hasBattle
+    ? `<button class="button" data-action="build-lineup">BUILD LINEUP</button>`
+    : state.queueEntry && !hasPairing
+      ? `<button class="button secondary" data-action="leave-queue" ${state.queueBusy ? "disabled" : ""}>${state.queueBusy ? "LEAVING…" : "LEAVE QUEUE"}</button>`
+      : "";
 
   const authStatus = state.authenticated
     ? `Authenticated as ${escapeHtml(shortValue(state.wallet))}. Queue mutations are tied to this session.`
     : "Connect and sign the authentication challenge to enter the ranked queue.";
+  const pairingNotice = hasPairing
+    ? `<div class="alert"><strong>${hasBattle ? "MATCH FOUND" : "OPPONENT FOUND"}:</strong> ${escapeHtml(shortValue(state.pairing.opponent))} · ${escapeHtml(String(state.pairing.opponent_rating))} rating · ${escapeHtml(state.pairing.status)}${hasBattle ? " · Battle confirmed" : " · waiting for Battle confirmation"}</div>`
+    : state.queueEntry
+      ? `<div class="alert"><strong>SEARCHING FOR OPPONENT:</strong> your queue admission is recorded for this MarketRound. The lineup builder opens only after the coordinator creates the Battle.</div>`
+      : "";
   return `
     <section class="hero">
       <p class="eyebrow">Public Ranked</p>
@@ -680,7 +699,7 @@ function renderQueue() {
       <p class="lede">Matchmaking is scheduled around one shared market window. There is no instant matchmaking and no hidden source switch.</p>
     </section>
     <article class="card">
-      <div class="row"><div><h2>NEXT PUBLIC RANKED ROUND</h2><span class="muted">Round ${escapeHtml(state.round.round_sequence)} · frozen public-equity universe</span></div><span class="status-pill">${state.queueEntry ? "QUEUED" : "SCHEDULED"}</span></div>
+      <div class="row"><div><h2>NEXT PUBLIC RANKED ROUND</h2><span class="muted">Round ${escapeHtml(state.round.round_sequence)} · frozen public-equity universe</span></div><span class="status-pill">${queueLabel}</span></div>
       <div class="source-line"><span class="source-pill">${escapeHtml(source.queue)}</span><span class="domain-pill">${escapeHtml(state.round.competition_domain)}</span><span class="cluster-pill">${escapeHtml(state.round.network)}</span></div>
       <div class="grid two">
         <div><div class="row"><span class="row-label">Round</span><strong>12:00–16:00 UTC</strong></div><div class="row"><span class="row-label">Queue closes</span><strong>11:45 UTC</strong></div></div>
@@ -688,6 +707,7 @@ function renderQueue() {
       </div>
       <div class="alert"><strong>Source transparency:</strong> the provider and settlement source are frozen before queue admission. You cannot choose a different provider after freeze.</div>
       <div class="alert"><strong>Session:</strong> ${authStatus}</div>
+      ${pairingNotice}
       <div class="hero-actions">${action}<button class="button secondary" data-action="home">BACK HOME</button></div>
       ${state.authError ? `<p class="muted" style="margin: 16px 0 0; font-size: 0.76rem">${escapeHtml(state.authError)}</p>` : ""}
     </article>`;
@@ -1044,10 +1064,12 @@ function authDomain() {
 }
 
 function clearAuthenticatedState() {
+  stopRankedStatusPolling();
   state.wallet = null;
   state.authenticated = false;
   state.authExpiresAt = null;
   state.queueEntry = null;
+  state.pairing = null;
   state.profile = DEMO_PROFILE;
   state.achievements = DEMO_ACHIEVEMENTS;
 }
@@ -1126,12 +1148,48 @@ async function logoutWallet() {
   showToast("Wallet signed out.");
 }
 
+function stopRankedStatusPolling() {
+  if (state.rankedStatusTimer) window.clearInterval(state.rankedStatusTimer);
+  state.rankedStatusTimer = null;
+  state.rankedStatusPollInFlight = false;
+}
+
+async function pollRankedStatus() {
+  if (!state.authenticated || !state.queueEntry || !state.round?.id || state.rankedStatusPollInFlight) return;
+  state.rankedStatusPollInFlight = true;
+  try {
+    const status = await api(`/v1/ranked/status?market_round_id=${encodeURIComponent(state.round.id)}`);
+    state.queueEntry = status.queue;
+    state.pairing = status.pairing;
+    if (status.pairing?.battle_pubkey) {
+      state.battlePubkey = status.pairing.battle_pubkey;
+      stopRankedStatusPolling();
+      showToast("Match found. Build your lineup when ready.");
+    }
+    render();
+  } catch (error) {
+    if (error.status === 401) clearAuthenticatedState();
+    else state.authError = error.message || "RANKED_STATUS_UNAVAILABLE";
+    render();
+  } finally {
+    state.rankedStatusPollInFlight = false;
+  }
+}
+
+function startRankedStatusPolling() {
+  stopRankedStatusPolling();
+  void pollRankedStatus();
+  state.rankedStatusTimer = window.setInterval(() => void pollRankedStatus(), 3000);
+}
+
 async function joinQueue() {
   if (!state.authenticated) {
     await connectWallet();
     if (!state.authenticated) return;
   }
   state.queueBusy = true;
+  state.pairing = null;
+  state.authError = null;
   render();
   try {
     state.queueEntry = await api("/v1/ranked/queue", {
@@ -1139,8 +1197,9 @@ async function joinQueue() {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ market_round_id: state.round.id }),
     });
-    showToast("Queue admission accepted. Continue with the backend-provided Battle.");
-    setView("roster");
+    showToast("Queue admission accepted. Searching for an opponent.");
+    setView("queue");
+    startRankedStatusPolling();
   } catch (error) {
     if (error.status === 401) clearAuthenticatedState();
     showToast(`Queue admission failed: ${error.message}`);
@@ -1162,7 +1221,9 @@ async function leaveQueue() {
     await api(`/v1/ranked/queue?market_round_id=${encodeURIComponent(state.round.id)}`, {
       method: "DELETE",
     });
+    stopRankedStatusPolling();
     state.queueEntry = null;
+    state.pairing = null;
     showToast("You left the ranked queue.");
     setView("queue");
   } catch (error) {
@@ -1235,6 +1296,15 @@ document.addEventListener("click", async (event) => {
   }
   if (action === "start-roster") {
     await joinQueue();
+    return;
+  }
+  if (action === "build-lineup") {
+    if (!state.pairing?.battle_pubkey) {
+      showToast("Wait for the coordinator to create the Battle.");
+      return;
+    }
+    state.battlePubkey = state.pairing.battle_pubkey;
+    setView("roster");
     return;
   }
   if (action === "connect") {
