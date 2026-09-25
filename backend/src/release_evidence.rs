@@ -18,6 +18,10 @@ pub const MIN_TESTERS: usize = 8;
 pub const MAX_TESTERS: usize = 20;
 pub const MIN_BATTLE_WINDOWS: usize = 2;
 pub const REQUIRED_LEAGUE_PLAYERS: usize = 100;
+pub const REQUIRED_LEAGUE_ROUNDS: usize = 5;
+pub const REQUIRED_LEAGUE_PAIRINGS: usize = 250;
+pub const LEAGUE_SIMULATION_SCHEMA_VERSION: u16 = 1;
+pub const FINALIZED_ACHIEVEMENT_INPUT: &str = "FINALIZED_BATTLE_FACTS";
 pub const DEVNET_CLUSTER: &str = "devnet";
 pub const PUBLIC_DEVNET_RPC: &str = "public_devnet";
 pub const JUPITER_SOURCE_KIND: &str = "JUPITER_TOKEN_SPOT_V1";
@@ -119,6 +123,97 @@ pub struct LeagueSimulationEvidence {
     pub evidence_path: String,
 }
 
+/// Retained content record for the deterministic League run used in release
+/// review. This is intentionally a compact summary rather than a second
+/// standings implementation: the detailed schedule and facts remain the
+/// operator's evidence artifact, while these fields make its safety claims
+/// machine-checkable.
+#[derive(Debug, Clone, Deserialize)]
+pub struct LeagueSimulationArtifact {
+    pub schema_version: u16,
+    pub cluster: String,
+    pub player_count: usize,
+    pub unique_players: usize,
+    pub round_count: usize,
+    pub pairing_count: usize,
+    pub bye_count: usize,
+    pub rematch_count: usize,
+    pub one_active_pairing_per_player: bool,
+    pub deterministic_replay_hash: String,
+    pub standings_input_hash: String,
+    pub standings_count: usize,
+    pub finalized_battle_count: usize,
+    pub projected_battle_count: usize,
+    pub achievement_input_state: String,
+    pub achievement_facts_finalized: bool,
+    pub replay_achievement_count: usize,
+    pub reward_claim_count: usize,
+}
+
+/// Validates the retained League report that accompanies an evidence-mode
+/// beta manifest. The validator rejects a report that could derive
+/// achievements from projected, replayed, or economically rewarded data.
+pub fn validate_league_simulation_artifact(
+    artifact: &LeagueSimulationArtifact,
+) -> Result<(), String> {
+    if artifact.schema_version != LEAGUE_SIMULATION_SCHEMA_VERSION {
+        return Err(format!(
+            "League report schema must be {}, found {}",
+            LEAGUE_SIMULATION_SCHEMA_VERSION, artifact.schema_version
+        ));
+    }
+    if artifact.cluster != DEVNET_CLUSTER {
+        return Err("League report must target Solana Devnet".to_owned());
+    }
+    if artifact.player_count != REQUIRED_LEAGUE_PLAYERS
+        || artifact.unique_players != REQUIRED_LEAGUE_PLAYERS
+        || artifact.round_count != REQUIRED_LEAGUE_ROUNDS
+    {
+        return Err("League report must contain 100 unique players across five rounds".to_owned());
+    }
+    if artifact.pairing_count != REQUIRED_LEAGUE_PAIRINGS
+        || artifact.finalized_battle_count != REQUIRED_LEAGUE_PAIRINGS
+        || artifact.bye_count != 0
+        || artifact.rematch_count != 0
+        || !artifact.one_active_pairing_per_player
+    {
+        return Err(
+            "League report must contain 250 finalized pairings, no byes, no rematches, and complete player exposure"
+                .to_owned(),
+        );
+    }
+    if artifact.standings_count != REQUIRED_LEAGUE_PLAYERS {
+        return Err("League report must retain standings for all 100 players".to_owned());
+    }
+    if artifact.projected_battle_count != 0
+        || artifact.achievement_input_state != FINALIZED_ACHIEVEMENT_INPUT
+        || !artifact.achievement_facts_finalized
+        || artifact.replay_achievement_count != 0
+    {
+        return Err(
+            "League achievements must use finalized Battle facts and exclude projected or replayed inputs"
+                .to_owned(),
+        );
+    }
+    if artifact.reward_claim_count != 0 {
+        return Err("the retained Devnet League report must not claim economic rewards".to_owned());
+    }
+    for (name, value) in [
+        (
+            "deterministic_replay_hash",
+            artifact.deterministic_replay_hash.as_str(),
+        ),
+        (
+            "standings_input_hash",
+            artifact.standings_input_hash.as_str(),
+        ),
+    ] {
+        if value.len() != 64 || !value.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Err(format!("{name} must be a 64-character hexadecimal hash"));
+        }
+    }
+    Ok(())
+}
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 pub struct EvidenceCheck {
     pub name: String,
@@ -497,6 +592,18 @@ pub fn validate_beta_evidence_artifacts(
             ));
         }
     }
+
+    let league_report_path = root.join(&manifest.league_simulation.evidence_path);
+    let league_report = fs::read_to_string(&league_report_path).map_err(|error| {
+        format!(
+            "League report cannot be read: {}: {error}",
+            manifest.league_simulation.evidence_path
+        )
+    })?;
+    let league_artifact: LeagueSimulationArtifact = serde_json::from_str(&league_report)
+        .map_err(|error| format!("League report is not valid JSON: {error}"))?;
+    validate_league_simulation_artifact(&league_artifact)
+        .map_err(|error| format!("League report content is invalid: {error}"))?;
     Ok(())
 }
 
@@ -923,6 +1030,44 @@ mod tests {
         assert!(report.contract_valid);
         assert!(report.release_ready);
         assert!(report.checks.iter().all(|check| check.passed));
+    }
+
+    fn valid_league_artifact() -> LeagueSimulationArtifact {
+        LeagueSimulationArtifact {
+            schema_version: LEAGUE_SIMULATION_SCHEMA_VERSION,
+            cluster: DEVNET_CLUSTER.to_owned(),
+            player_count: REQUIRED_LEAGUE_PLAYERS,
+            unique_players: REQUIRED_LEAGUE_PLAYERS,
+            round_count: REQUIRED_LEAGUE_ROUNDS,
+            pairing_count: REQUIRED_LEAGUE_PAIRINGS,
+            bye_count: 0,
+            rematch_count: 0,
+            one_active_pairing_per_player: true,
+            deterministic_replay_hash: "a".repeat(64),
+            standings_input_hash: "b".repeat(64),
+            standings_count: REQUIRED_LEAGUE_PLAYERS,
+            finalized_battle_count: REQUIRED_LEAGUE_PAIRINGS,
+            projected_battle_count: 0,
+            achievement_input_state: FINALIZED_ACHIEVEMENT_INPUT.to_owned(),
+            achievement_facts_finalized: true,
+            replay_achievement_count: 0,
+            reward_claim_count: 0,
+        }
+    }
+
+    #[test]
+    fn retained_league_report_rejects_projected_achievement_inputs() {
+        let mut artifact = valid_league_artifact();
+        artifact.projected_battle_count = 1;
+
+        let error = validate_league_simulation_artifact(&artifact).unwrap_err();
+
+        assert!(error.contains("finalized Battle facts"));
+    }
+
+    #[test]
+    fn retained_league_report_accepts_complete_finalized_devnet_shape() {
+        assert!(validate_league_simulation_artifact(&valid_league_artifact()).is_ok());
     }
 
     #[test]

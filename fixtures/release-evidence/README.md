@@ -39,3 +39,14 @@ cargo run -p backend -- release-freeze-gate \
   fixtures/release-evidence/feature-freeze.contract.json \
   fixtures/release-evidence/beta-evidence.contract.json
 ```
+
+
+League retained report
+
+For an evidence-mode manifest, the League report must be a real JSON artifact at the referenced path. Validate it independently with:
+
+```bash
+cargo run -p backend -- league-evidence-gate artifacts/release-evidence/league-100.json
+```
+
+The report contract requires the deterministic five-round, 100-player run to retain 250 finalized pairings, zero byes and rematches, a complete 100-player standings snapshot, and both deterministic/replay input hashes. Achievement derivation must identify `FINALIZED_BATTLE_FACTS`, contain no projected or replay achievement inputs, and claim no economic rewards. A contract fixture may describe this shape, but it cannot substitute for the operator-retained artifact.

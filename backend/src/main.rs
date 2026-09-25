@@ -210,6 +210,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Some("market-data-baseline-gate") => run_market_data_baseline_gate()?,
         Some("sponsor-readiness-gate") => run_sponsor_readiness_gate()?,
         Some("beta-evidence-gate") => run_beta_evidence_gate()?,
+        Some("league-evidence-gate") => run_league_evidence_gate()?,
         Some("release-freeze-gate") => run_release_freeze_gate()?,
         Some("jupiter-proof-gate") => run_jupiter_proof_gate()?,
         Some("jupiter-smoke") => run_jupiter_smoke().await?,
@@ -413,6 +414,32 @@ fn run_beta_evidence_gate() -> Result<(), Box<dyn Error>> {
     if manifest.mode == release_evidence::EVIDENCE_MODE && !release_ready {
         return Err("beta evidence is incomplete".into());
     }
+    Ok(())
+}
+
+/// Validates the retained League simulation artifact directly. This command
+/// is offline and read-only: it checks operator-provided report content but
+/// never creates a fake run or claims that external evidence exists.
+fn run_league_evidence_gate() -> Result<(), Box<dyn Error>> {
+    let report_path = env::args()
+        .nth(2)
+        .ok_or("usage: cargo run -p backend -- league-evidence-gate <report.json>")?;
+    let artifact: release_evidence::LeagueSimulationArtifact =
+        serde_json::from_str(&read_to_string(&report_path)?)?;
+    release_evidence::validate_league_simulation_artifact(&artifact)
+        .map_err(|error| format!("League evidence is invalid: {error}"))?;
+    println!(
+        "{}",
+        serde_json::json!({
+            "scope": "league_evidence",
+            "report": report_path,
+            "valid": true,
+            "player_count": artifact.player_count,
+            "round_count": artifact.round_count,
+            "finalized_battle_count": artifact.finalized_battle_count,
+            "achievement_input_state": artifact.achievement_input_state,
+        })
+    );
     Ok(())
 }
 
@@ -985,6 +1012,7 @@ Metadata: cargo run -p backend -- record-token-metadata
 Market-data baseline gate: cargo run -p backend -- market-data-baseline-gate fixtures/market-data SPYx
 Sponsor readiness gate: cargo run -p backend -- sponsor-readiness-gate fixtures/market-data/sponsors
 Beta evidence gate: cargo run -p backend -- beta-evidence-gate [manifest.json]
+League evidence gate: cargo run -p backend -- league-evidence-gate <report.json>
 Release freeze gate: cargo run -p backend -- release-freeze-gate [freeze.json] [beta.json]
 Jupiter proof gate: cargo run -p backend -- jupiter-proof-gate <bundle.json>
 Live Jupiter smoke: cargo run -p backend -- jupiter-smoke <mint[,mint...]>
