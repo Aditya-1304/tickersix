@@ -148,6 +148,8 @@ const DEMO_PROOF = {
     side_b_lineup: [1, 2, 3, 4, 5, 7],
     side_b_captain: 2,
     side_b_score_q9: 11_300_000,
+    side_a_participant: { wallet: "DemoPlayerA111111111111111111111111111111", commit_transaction_signature: "commit-a-demo", reveal_transaction_signature: "reveal-a-demo" },
+    side_b_participant: { wallet: "DemoPlayerB111111111111111111111111111111", commit_transaction_signature: "commit-b-demo", reveal_transaction_signature: "reveal-b-demo" },
     result: "PLAYER_A",
   },
   round_assets: DEMO_ASSETS.slice(0, 6).map((asset) => ({
@@ -336,6 +338,7 @@ const state = {
   battleStreamError: null,
   replay: DEMO_MODE ? DEMO_REPLAY : null,
   proof: DEMO_MODE ? DEMO_PROOF : null,
+  proofError: null,
   replayIndex: DEMO_MODE ? DEMO_REPLAY.events.length - 1 : 0,
   replayPlaying: false,
   replayTimer: null,
@@ -583,14 +586,38 @@ async function loadReplay() {
   }
 }
 
+function isCompletePublicProof(proof) {
+  const battle = proof?.battle;
+  const assets = proof?.round_assets;
+  const participantIsBound = (participant) => Boolean(participant?.wallet?.trim());
+  return Boolean(
+    proof?.market_round?.market_round_pubkey?.trim() && battle?.battle_pubkey?.trim() &&
+      typeof battle.result === "string" && participantIsBound(battle.side_a_participant) &&
+      participantIsBound(battle.side_b_participant) && Array.isArray(assets) && assets.length >= 6 &&
+      Array.isArray(proof.transaction_signatures) && proof.transaction_signatures.length > 0,
+  );
+}
 async function loadProof() {
-  try {
-    state.proof = await api(`/v1/battles/${state.battlePubkey}/proof`);
-  } catch {
+  state.proofError = null;
+  if (!state.battlePubkey) {
     state.proof = DEMO_MODE ? DEMO_PROOF : null;
+    if (!DEMO_MODE) state.proofError = "BATTLE_NOT_SELECTED";
+    return null;
+  }
+  state.proof = null;
+  try {
+    const proof = await api(`/v1/battles/${state.battlePubkey}/proof`);
+    if (!isCompletePublicProof(proof)) throw new Error("PROOF_RESPONSE_INCOMPLETE");
+    state.proof = proof;
+    state.proofError = null;
+    state.backendOnline = true;
+    return proof;
+  } catch (error) {
+    state.proof = DEMO_MODE ? DEMO_PROOF : null;
+    if (!DEMO_MODE) state.proofError = error.message || "PROOF_UNAVAILABLE";
+    return null;
   }
 }
-
 async function loadPrivateMarkets() {
   state.privateMarketsLoading = true;
   state.privateMarketsError = null;
@@ -1098,37 +1125,55 @@ function renderResult() {
     </article>`;
 }
 function renderProof() {
-  if (!state.proof && !DEMO_MODE) return renderLiveUnavailable("Verified proof is not available for this Battle yet.");
+  if (!state.proof && !DEMO_MODE) return renderLiveUnavailable(state.proofError || "Verified proof is not available for this Battle yet.");
   const proof = state.proof || (DEMO_MODE ? DEMO_PROOF : null);
   const battle = proof?.battle || null;
   const round = proof?.market_round || null;
-  if (!proof || !battle || !round) {
+  if (!proof || !battle || !round || !isCompletePublicProof(proof)) {
     return renderLiveUnavailable("Verified proof is incomplete for this Battle.");
   }
+  const sideA = battle.side_a_participant;
+  const sideB = battle.side_b_participant;
+  const scoreAQ9 = battle.side_a_score_q9 ?? "UNAVAILABLE";
+  const scoreBQ9 = battle.side_b_score_q9 ?? "UNAVAILABLE";
+  const finalizedAssets = proof.round_assets.filter((asset) => asset.start?.state === "FINALIZED" && asset.end?.state === "FINALIZED").length;
+  const retainedLineupTransactions = [sideA, sideB].every((participant) => participant.commit_transaction_signature && participant.reveal_transaction_signature);
+  const assetRows = proof.round_assets
+    .map((asset) => `<div class="proof-item"><small>${escapeHtml(asset.symbol)} · ${escapeHtml(asset.round_asset_pubkey || "ROUND ASSET PDA UNAVAILABLE")}</small><code>start_q9=${escapeHtml(asset.start?.finalized_price_q9 ?? "UNAVAILABLE")} · end_q9=${escapeHtml(asset.end?.finalized_price_q9 ?? "UNAVAILABLE")} · return=${escapeHtml(asset.display_return || formatScore(asset.return_q9))}</code></div>`)
+    .join("");
+  const transactionRows = proof.transaction_signatures
+    .map((signature) => `<div class="proof-item"><small>Retained settlement evidence</small><code>${escapeHtml(signature)}</code></div>`)
+    .join("");
   return `
     <section class="hero">
-      <p class="eyebrow">Source-specific proof</p>
-      <h1>Every fact has a trail.</h1>
-      <p class="lede">Competitive proof is public and replayable. Secrets, commitment preimages, and provider credentials never enter this view.</p>
+      <p class="eyebrow">Source-specific proof · Solana Devnet</p>
+      <h1>VERIFIED RESULT</h1>
+      <p class="lede">The values below are derived from the validated PublicProof response. This client does not calculate, rename, or substitute competitive facts.</p>
     </section>
     <article class="card">
-      <div class="source-line"><span class="source-pill final">${escapeHtml(proof.source_trust_label)}</span><span class="domain-pill">PUBLIC EQUITY</span><span class="cluster-pill">SOLANA DEVNET</span></div>
-      <div class="proof-grid">
-        <div class="proof-item"><small>Battle pubkey</small><code>${escapeHtml(shortValue(battle.battle_pubkey))}</code></div>
-        <div class="proof-item"><small>Market Round</small><code>${escapeHtml(shortValue(round.market_round_pubkey))}</code></div>
-        <div class="proof-item"><small>Source policy</small><code>${escapeHtml(round.source_kind)} · P${round.price_policy_version}</code></div>
-        <div class="proof-item"><small>Reconciled slot</small><code>${escapeHtml(proof.reconciled_slot || "CHAIN-RECONCILED")}</code></div>
-        <div class="proof-item"><small>Side A wallet</small><code>WalletA · commit/reveal retained</code></div>
-        <div class="proof-item"><small>Side B wallet</small><code>WalletB · commit/reveal retained</code></div>
+      <div class="source-line"><span class="source-pill final">${escapeHtml(proof.source_trust_label)}</span><span class="domain-pill">PUBLIC EQUITY</span><span class="cluster-pill">RECONCILED SLOT ${escapeHtml(proof.reconciled_slot)}</span></div>
+      <div class="grid three">
+        <div class="stat-card"><span class="stat-label">Canonical result</span><span class="stat-value">${escapeHtml(battle.result)}</span><span class="stat-subvalue">Battle ${escapeHtml(shortValue(battle.battle_pubkey))}</span></div>
+        <div class="stat-card"><span class="stat-label">Player A score</span><span class="stat-value">${escapeHtml(formatScore(battle.side_a_score_q9))}</span><span class="stat-subvalue">Q9 ${escapeHtml(scoreAQ9)}</span></div>
+        <div class="stat-card"><span class="stat-label">Player B score</span><span class="stat-value">${escapeHtml(formatScore(battle.side_b_score_q9))}</span><span class="stat-subvalue">Q9 ${escapeHtml(scoreBQ9)}</span></div>
       </div>
-      <div class="section-heading"><h2>Canonical lineup</h2><span class="muted">6 picks · captain ${escapeHtml(battle.side_a_captain || 1)}</span></div>
-      <div class="grid two"><div class="alert"><strong>Side A</strong><br />${battle.side_a_lineup.join(" · ")}<br />Q9 score: ${escapeHtml(battle.side_a_score_q9)}</div><div class="alert"><strong>Side B</strong><br />${battle.side_b_lineup.join(" · ")}<br />Q9 score: ${escapeHtml(battle.side_b_score_q9)}</div></div>
-      <div class="section-heading"><h2>Transactions</h2></div>
-      <div class="proof-grid">${(proof.transaction_signatures || []).map((signature) => `<div class="proof-item"><small>Retained signature</small><code>${escapeHtml(signature)}</code></div>`).join("")}</div>
+      <div class="section-heading"><h2>SETTLEMENT EVIDENCE</h2><span class="muted">${finalizedAssets}/${proof.round_assets.length} assets finalized</span></div>
+      <div class="proof-grid">
+        <div class="proof-item"><small>Lineup participants</small><code>${escapeHtml(sideA.wallet)} · ${escapeHtml(sideB.wallet)}</code></div>
+        <div class="proof-item"><small>Lineup transaction coverage</small><code>${retainedLineupTransactions ? "COMMIT + REVEAL RETAINED" : "INCOMPLETE"}</code></div>
+        <div class="proof-item"><small>Frozen MarketRound</small><code>${escapeHtml(round.market_round_pubkey)}</code></div>
+        <div class="proof-item"><small>Settlement transaction</small><code>${escapeHtml(round.settlement_transaction_signature || "UNAVAILABLE")}</code></div>
+        <div class="proof-item"><small>Policy versions</small><code>registry ${escapeHtml(round.registry_version)} · price P${escapeHtml(round.price_policy_version)} · quality Q${escapeHtml(round.quality_policy_version)} · attestors A${escapeHtml(round.attestor_set_version)}</code></div>
+      </div>
+      <div class="section-heading"><h2>ROUND ASSET PROOF</h2><span class="muted">Canonical frozen assets</span></div>
+      <div class="proof-grid">${assetRows}</div>
+      <div class="section-heading"><h2>Participant lineups</h2></div>
+      <div class="grid two"><div class="alert"><strong>Side A</strong><br />Wallet: ${escapeHtml(sideA.wallet)}<br />Captain: ${escapeHtml(battle.side_a_captain ?? "UNAVAILABLE")}<br />Lineup: ${escapeHtml(battle.side_a_lineup.join(" · "))}</div><div class="alert"><strong>Side B</strong><br />Wallet: ${escapeHtml(sideB.wallet)}<br />Captain: ${escapeHtml(battle.side_b_captain ?? "UNAVAILABLE")}<br />Lineup: ${escapeHtml(battle.side_b_lineup.join(" · "))}</div></div>
+      <div class="section-heading"><h2>Retained transactions</h2></div>
+      <div class="proof-grid">${transactionRows}</div>
       <div class="proof-actions"><button class="button" data-action="replay">REPLAY FINALIZED ROUND</button><button class="button secondary" data-action="result">BACK TO RESULT</button></div>
     </article>`;
 }
-
 function renderReplay() {
   if (!state.replay && !DEMO_MODE) return renderLiveUnavailable("A verified replay is not available yet.");
   const current = currentReplayEvent();
