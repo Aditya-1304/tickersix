@@ -369,6 +369,10 @@ const state = {
   achievements: DEMO_MODE ? DEMO_ACHIEVEMENTS : [],
   profileError: null,
   profileLoading: false,
+  leaderboard: null,
+  myLeaderboardEntry: null,
+  leaderboardLoading: false,
+  leaderboardError: null,
 };
 
 const app = document.querySelector("#app");
@@ -436,8 +440,46 @@ async function hydrateBackend() {
     state.backendOnline = false;
     if (!DEMO_MODE) state.round = null;
   }
+  await loadLeaderboard();
 }
 
+/**
+ * Loads the public active-season standings and the authenticated wallet rank.
+ *
+ * The public and session-bound endpoints are evaluated independently so a
+ * missing profile cannot erase a valid public leaderboard. Every failure is
+ * surfaced to the UI; no local rank or rating is synthesized.
+ */
+async function loadLeaderboard() {
+  state.leaderboardLoading = true;
+  state.leaderboardError = null;
+  render();
+  const authenticated = state.authenticated;
+  const [globalResult, personalResult] = await Promise.allSettled([
+    api("/v1/leaderboards/global?limit=10"),
+    authenticated ? api("/v1/leaderboards/global/me") : Promise.resolve(null),
+  ]);
+  const errors = [];
+  if (globalResult.status === "fulfilled") {
+    state.leaderboard = globalResult.value;
+    state.backendOnline = true;
+  } else {
+    state.leaderboard = null;
+    errors.push(globalResult.reason?.message || "LEADERBOARD_UNAVAILABLE");
+  }
+  if (authenticated && personalResult.status === "fulfilled") {
+    state.myLeaderboardEntry = personalResult.value;
+  } else if (authenticated) {
+    state.myLeaderboardEntry = null;
+    if (personalResult.reason?.status === 401) clearAuthenticatedState();
+    errors.push(personalResult.reason?.message || "PERSONAL_LEADERBOARD_UNAVAILABLE");
+  } else {
+    state.myLeaderboardEntry = null;
+  }
+  state.leaderboardError = errors.length ? errors.join(" · ") : null;
+  state.leaderboardLoading = false;
+  render();
+}
 async function loadBattle() {
   if (!state.battlePubkey) return null;
   state.battleSnapshotError = null;
@@ -751,6 +793,12 @@ function renderHome() {
   const recentBattleLabel = recentBattle ? shortValue(recentBattle.battle_pubkey) : "No live Battle selected";
   const recentBattleRound = recentBattle ? String(recentBattle.market_round_sequence) : "—";
   const recentResult = recentBattle?.result || "—";
+  const leaderboardEntries = Array.isArray(state.leaderboard?.entries) ? state.leaderboard.entries : [];
+  const leaderboardMarkup = state.leaderboard
+    ? leaderboardEntries.length
+      ? `<section class="card"><div class="leaderboard-list">${leaderboardEntries.map((entry) => `<div class="row"><div><span class="stat-label">#${escapeHtml(entry.rank)}</span><strong>${escapeHtml(entry.display_name || shortValue(entry.wallet))}</strong><span class="muted">${escapeHtml(shortValue(entry.wallet))} · ${escapeHtml(entry.tier)}</span></div><strong>${escapeHtml(entry.rating)}</strong></div>`).join("")}</div></section>`
+      : `<section class="card"><div class="empty-state">No placement-eligible players are in the active season yet.</div></section>`
+    : `<section class="card"><div class="empty-state">${escapeHtml(state.leaderboardLoading ? "Loading leaderboard…" : state.leaderboardError || "Leaderboard data is not available.")}</div></section>`;
   return `
     <section class="hero">
       <p class="eyebrow">Stocklana · Public market battles</p>
@@ -787,6 +835,9 @@ function renderHome() {
       <article class="card stat-card"><span class="stat-label">Global rank</span><span class="stat-value">${escapeHtml(leaderboardRank)}</span><span class="stat-subvalue">PUBLIC EQUITY · ACTIVE SEASON</span></article>
       <article class="card stat-card"><span class="stat-label">Placement</span><span class="stat-value">${escapeHtml(placement)}</span><span class="stat-subvalue">Loaded from the authenticated profile</span></article>
     </section>
+
+    <div class="section-heading"><h2>GLOBAL LEADERBOARD</h2><span class="muted">${state.leaderboard?.season_name ? escapeHtml(state.leaderboard.season_name) : "Server-derived"}</span></div>
+    ${leaderboardMarkup}
 
     <div class="section-heading"><h2>Recent Battle</h2><button class="button ghost" data-action="replay">OPEN REPLAY</button></div>
     <article class="card">
@@ -1342,6 +1393,7 @@ function clearAuthenticatedState() {
   state.pairing = null;
   state.profile = DEMO_MODE ? DEMO_PROFILE : null;
   state.achievements = DEMO_MODE ? DEMO_ACHIEVEMENTS : [];
+  state.myLeaderboardEntry = null;
 }
 
 async function restoreSession() {
@@ -1356,6 +1408,7 @@ async function restoreSession() {
     clearAuthenticatedState();
     if (error.status && error.status !== 401) state.authError = error.message;
   }
+  await loadLeaderboard();
   render();
 }
 
@@ -1390,6 +1443,7 @@ async function connectWallet() {
     state.authExpiresAt = session.expires_at;
     state.backendOnline = true;
     await loadProfile();
+    await loadLeaderboard();
     showToast(`Wallet authenticated: ${shortValue(state.wallet)}`);
   } catch (error) {
     clearAuthenticatedState();
@@ -1755,6 +1809,7 @@ document.addEventListener("click", async (event) => {
   }
   if (action === "profile") {
     await loadProfile();
+    await loadLeaderboard();
     setView("profile");
     return;
   }
