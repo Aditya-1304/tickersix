@@ -25,6 +25,7 @@ use tokio::net::TcpListener;
 use crate::{
     achievements::{self, AchievementError},
     auth::{self, AuthError},
+    battle_snapshot::{self, BattleSnapshotError},
     db,
     leaderboard::{self, LeaderboardError},
     league::{self, LeagueError},
@@ -110,6 +111,7 @@ pub fn router(state: ApiState) -> Router {
             "/v1/market-rounds/{pubkey}/proof",
             get(get_market_round_proof),
         )
+        .route("/v1/battles/{pubkey}", get(get_battle_snapshot))
         .route("/v1/battles/{pubkey}/proof", get(get_battle_proof))
         .route("/v1/battles/{pubkey}/replay", get(get_battle_replay))
         .route(
@@ -227,6 +229,7 @@ struct ErrorBody {
 pub enum ApiError {
     Auth(AuthError),
     Achievements(AchievementError),
+    BattleSnapshot(BattleSnapshotError),
     Leaderboard(LeaderboardError),
     League(LeagueError),
     Live(LiveError),
@@ -244,6 +247,7 @@ impl fmt::Display for ApiError {
         match self {
             Self::Auth(error) => write!(formatter, "{error}"),
             Self::Achievements(error) => write!(formatter, "{error}"),
+            Self::BattleSnapshot(error) => write!(formatter, "{error}"),
             Self::Leaderboard(error) => write!(formatter, "{error}"),
             Self::League(error) => write!(formatter, "{error}"),
             Self::Live(error) => write!(formatter, "{error}"),
@@ -272,6 +276,8 @@ impl IntoResponse for ApiError {
             | Self::Auth(AuthError::SessionExpired)
             | Self::DomainMismatch => StatusCode::UNAUTHORIZED,
             Self::Achievements(AchievementError::InvalidWallet) => StatusCode::BAD_REQUEST,
+            Self::BattleSnapshot(BattleSnapshotError::InvalidBattle) => StatusCode::BAD_REQUEST,
+            Self::BattleSnapshot(BattleSnapshotError::NotFound) => StatusCode::NOT_FOUND,
             Self::Profile(ProfileError::InvalidWallet)
             | Self::Profile(ProfileError::InvalidDisplayName)
             | Self::Profile(ProfileError::InvalidAvatarUrl) => StatusCode::BAD_REQUEST,
@@ -379,6 +385,9 @@ impl IntoResponse for ApiError {
             Self::Lineup(LineupError::TransactionBuildFailed | LineupError::Storage(_)) => {
                 StatusCode::INTERNAL_SERVER_ERROR
             }
+            Self::BattleSnapshot(BattleSnapshotError::Storage(_)) => {
+                StatusCode::INTERNAL_SERVER_ERROR
+            }
         };
         (
             status,
@@ -393,6 +402,12 @@ impl IntoResponse for ApiError {
 impl From<AuthError> for ApiError {
     fn from(error: AuthError) -> Self {
         Self::Auth(error)
+    }
+}
+
+impl From<BattleSnapshotError> for ApiError {
+    fn from(error: BattleSnapshotError) -> Self {
+        Self::BattleSnapshot(error)
     }
 }
 
@@ -870,6 +885,15 @@ async fn get_metrics() -> Response {
         .into_response()
 }
 
+async fn get_battle_snapshot(
+    State(state): State<ApiState>,
+    Path(battle_pubkey): Path<String>,
+) -> Result<Json<battle_snapshot::BattleSnapshot>, ApiError> {
+    Ok(Json(
+        battle_snapshot::get_battle(&state.pool, &battle_pubkey).await?,
+    ))
+}
+
 async fn stream_battle(
     State(state): State<ApiState>,
     Path(battle_pubkey): Path<String>,
@@ -949,6 +973,9 @@ fn error_code(error: &ApiError) -> &'static str {
         ApiError::League(LeagueError::CoordinatorConflict) => "COORDINATOR_CONFLICT",
         ApiError::League(LeagueError::InvalidStandings) => "INVALID_LEAGUE_STANDINGS",
         ApiError::Live(LiveError::InvalidBattle) => "INVALID_BATTLE",
+        ApiError::BattleSnapshot(BattleSnapshotError::InvalidBattle) => "INVALID_BATTLE",
+        ApiError::BattleSnapshot(BattleSnapshotError::NotFound) => "BATTLE_NOT_FOUND",
+        ApiError::BattleSnapshot(BattleSnapshotError::Storage(_)) => "INTERNAL_ERROR",
         ApiError::Live(LiveError::NotFound) => "BATTLE_NOT_FOUND",
         ApiError::Live(LiveError::Storage(_)) => "INTERNAL_ERROR",
         ApiError::Proof(ProofError::NotConfigured | ProofError::PathMismatch) => "PROOF_NOT_FOUND",

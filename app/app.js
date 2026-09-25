@@ -326,6 +326,8 @@ const state = {
   revealSignature: null,
   revealError: null,
   battlePubkey: DEMO_BATTLE,
+  battleSnapshot: null,
+  battleSnapshotError: null,
   replay: DEMO_REPLAY,
   proof: DEMO_PROOF,
   replayIndex: DEMO_REPLAY.events.length - 1,
@@ -422,6 +424,21 @@ async function hydrateBackend() {
     state.backendOnline = true;
   } catch {
     state.backendOnline = false;
+  }
+}
+
+async function loadBattle() {
+  if (!state.battlePubkey) return null;
+  state.battleSnapshotError = null;
+  try {
+    state.battleSnapshot = await api("/v1/battles/" + encodeURIComponent(state.battlePubkey));
+    state.backendOnline = true;
+    return state.battleSnapshot;
+  } catch (error) {
+    state.battleSnapshot = null;
+    state.battleSnapshotError = error.message || "BATTLE_SNAPSHOT_UNAVAILABLE";
+    if (error.status !== 404) showToast("Battle snapshot unavailable: " + state.battleSnapshotError);
+    return null;
   }
 }
 
@@ -1277,6 +1294,7 @@ async function pollRankedStatus() {
     state.pairing = status.pairing;
     if (status.pairing?.battle_pubkey) {
       state.battlePubkey = status.pairing.battle_pubkey;
+      await loadBattle();
       stopRankedStatusPolling();
       showToast("Match found. Build your lineup when ready.");
     }

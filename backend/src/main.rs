@@ -31,6 +31,7 @@ pub mod api;
 pub mod attestor;
 pub mod auth;
 pub mod battle_facts;
+pub mod battle_snapshot;
 pub mod db;
 pub mod hardening;
 pub mod indexer;

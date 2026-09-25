@@ -22,6 +22,7 @@ const requiredMarkers = [
   ["wallet-client.js", "wallet-standard:register-wallet"],
   ["wallet-client.js", "signAndSendTransaction"],
   ["app.js", "/v1/battles/"],
+  ["app.js", "async function loadBattle()"],
   ["app.js", "LINEUP LOCKED"],
   ["app.js", "/lineup/reveal/prepare"],
   ["app.js", "REVEAL LINEUP"],
