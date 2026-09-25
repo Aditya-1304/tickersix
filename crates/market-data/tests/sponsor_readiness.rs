@@ -1,8 +1,8 @@
 use market_data::{
     decide_private_market_activation, decide_pyth_activation, is_excluded_sponsor_provider,
-    parse_prestocks_catalog, parse_tessera_catalog, validate_pyth_payload, PrivateMarketActivation,
-    PrivateRepresentationError, PythActivationDecision, PythActivationInputs, PythPayloadError,
-    PythValidationPolicy,
+    parse_prestocks_catalog, parse_tessera_catalog, validate_pyth_payload,
+    validate_pyth_release_policy, PrivateMarketActivation, PrivateRepresentationError,
+    PythActivationDecision, PythActivationInputs, PythPayloadError, PythValidationPolicy,
 };
 
 const PYTH_PAYLOAD: &str = r#"{
@@ -84,6 +84,18 @@ fn pyth_preflight_rejects_a_carried_forward_price_when_freshness_is_required() {
     let error = validate_pyth_payload(&payload, valid_pyth_policy()).unwrap_err();
 
     assert_eq!(error, PythPayloadError::CarriedForwardPrice);
+}
+
+#[test]
+fn disabled_pyth_release_keeps_public_ranked_on_jupiter() {
+    let error = validate_pyth_release_policy(
+        "PYTH_PRO_VERIFIED_V1",
+        false,
+        PythActivationDecision::KeepJupiter,
+    )
+    .unwrap_err();
+
+    assert!(error.to_string().contains("JUPITER_TOKEN_SPOT_V1"));
 }
 
 #[test]

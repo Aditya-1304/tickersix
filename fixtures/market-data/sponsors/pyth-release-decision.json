@@ -1,0 +1,6 @@
+{
+  "enabled": false,
+  "public_ranked_source": "JUPITER_TOKEN_SPOT_V1",
+  "decision": "KeepJupiter",
+  "reason": "Pyth remains optional and disabled because no authorized trial verifier evidence is recorded; Public Ranked stays on the zero-cost Jupiter baseline."
+}

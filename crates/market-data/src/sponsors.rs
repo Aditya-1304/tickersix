@@ -402,6 +402,52 @@ pub fn decide_pyth_activation(inputs: PythActivationInputs) -> PythActivationDec
     PythActivationDecision::KeepJupiter
 }
 
+pub const JUPITER_SETTLEMENT_SOURCE_KIND: &str = "JUPITER_TOKEN_SPOT_V1";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PythReleasePolicyError {
+    DisabledPublicRankedSource { actual: String },
+    DisabledPythActivation,
+}
+
+impl fmt::Display for PythReleasePolicyError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::DisabledPublicRankedSource { actual } => write!(
+                formatter,
+                "disabled Pyth release must keep Public Ranked on {JUPITER_SETTLEMENT_SOURCE_KIND}; found {actual}"
+            ),
+            Self::DisabledPythActivation => formatter.write_str(
+                "disabled Pyth release cannot advertise an enabled Pyth settlement decision",
+            ),
+        }
+    }
+}
+
+impl std::error::Error for PythReleasePolicyError {}
+
+/// Keeps the zero-cost release configuration on Jupiter unless an authorized
+/// Pyth path has independently passed every activation gate. Analytics-only
+/// Pyth payloads may still be inspected, but they cannot become settlement
+/// authority for Public Ranked.
+pub fn validate_pyth_release_policy(
+    public_ranked_source: &str,
+    pyth_enabled: bool,
+    activation_decision: PythActivationDecision,
+) -> Result<(), PythReleasePolicyError> {
+    if !pyth_enabled {
+        if public_ranked_source != JUPITER_SETTLEMENT_SOURCE_KIND {
+            return Err(PythReleasePolicyError::DisabledPublicRankedSource {
+                actual: public_ranked_source.to_owned(),
+            });
+        }
+        if activation_decision == PythActivationDecision::Enabled {
+            return Err(PythReleasePolicyError::DisabledPythActivation);
+        }
+    }
+    Ok(())
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct PrivateRepresentationDescriptor {
     pub provider: String,

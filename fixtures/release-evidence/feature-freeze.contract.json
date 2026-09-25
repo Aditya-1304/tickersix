@@ -131,15 +131,15 @@
   "p1": [
     {
       "id": "pyth_verified_optional",
-      "status": "planned",
+      "status": "disabled",
       "evidence_path": "artifacts/release-evidence/freeze/pyth_verified_optional.json",
-      "note": "Tracked by the Release release record."
+      "note": "Disabled for the zero-cost Devnet release until an authorized Pyth trial and verifier proof exist."
     },
     {
       "id": "pyth_proof_panel",
-      "status": "planned",
+      "status": "disabled",
       "evidence_path": "artifacts/release-evidence/freeze/pyth_proof_panel.json",
-      "note": "Tracked by the Release release record."
+      "note": "Disabled with the optional Pyth settlement path; Jupiter remains the authoritative public proof source."
     },
     {
       "id": "prestocks_adapter",

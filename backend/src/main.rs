@@ -18,9 +18,10 @@ use market_data::{
     assess_private_market_catalogs, decide_pyth_activation,
     evaluate_xstocks_baseline_with_verified_token_program, stagger_offsets_millis,
     summarize_observation_window, validate_jupiter_baseline, validate_pyth_payload,
-    validate_sampling_plan, JupiterBaselineConfig, JupiterClient, MarketDataObservation,
-    PriceBatch, PythActivationDecision, PythActivationInputs, PythPayloadAssessment,
-    PythValidationPolicy, SponsorClient, XStocksBaselineSnapshot, XStocksClient,
+    validate_pyth_release_policy, validate_sampling_plan, JupiterBaselineConfig, JupiterClient,
+    MarketDataObservation, PriceBatch, PythActivationDecision, PythActivationInputs,
+    PythPayloadAssessment, PythValidationPolicy, SponsorClient, XStocksBaselineSnapshot,
+    XStocksClient,
 };
 use serde::{Deserialize, Serialize};
 use sqlx::postgres::PgPoolOptions;
@@ -105,6 +106,14 @@ struct PythCoverageFeed {
 }
 
 #[derive(Debug, Deserialize, Serialize)]
+struct PythReleaseDecisionFixture {
+    enabled: bool,
+    public_ranked_source: String,
+    decision: PythActivationDecision,
+    reason: String,
+}
+
+#[derive(Debug, Deserialize, Serialize)]
 struct PythDevnetEvidence {
     cluster: String,
     verifier_program: String,
@@ -132,6 +141,7 @@ struct SponsorReadinessReport {
     public_ranked_provider: &'static str,
     excluded_providers: Vec<&'static str>,
     pyth: SponsorReadinessPythReport,
+    pyth_release: PythReleaseDecisionFixture,
     private_market: market_data::PrivateMarketCatalogAssessment,
 }
 
@@ -309,6 +319,9 @@ fn run_sponsor_readiness_gate() -> Result<(), Box<dyn Error>> {
     let excluded: ExcludedProvidersFixture = serde_json::from_str(&read_to_string(
         fixture_root.join("excluded-providers.json"),
     )?)?;
+    let release_policy: PythReleaseDecisionFixture = serde_json::from_str(&read_to_string(
+        fixture_root.join("pyth-release-decision.json"),
+    )?)?;
     validate_excluded_providers(&excluded)?;
     if devnet.cluster != "devnet"
         || devnet.verifier_program != market_data::PYTH_PRO_DEVNET_VERIFIER_PROGRAM
@@ -330,6 +343,15 @@ fn run_sponsor_readiness_gate() -> Result<(), Box<dyn Error>> {
         q9_vectors_passed,
         cost_evidence_recorded,
     });
+    if release_policy.reason.trim().is_empty() || release_policy.decision != activation_decision {
+        return Err("Pyth release decision fixture does not match activation evidence".into());
+    }
+    validate_pyth_release_policy(
+        &release_policy.public_ranked_source,
+        release_policy.enabled,
+        activation_decision,
+    )?;
+
     let private_market = assess_private_market_catalogs(
         &read_to_string(fixture_root.join("prestocks.json"))?,
         &read_to_string(fixture_root.join("tessera.json"))?,
@@ -356,6 +378,7 @@ fn run_sponsor_readiness_gate() -> Result<(), Box<dyn Error>> {
                 cost_evidence_recorded,
                 activation_decision,
             },
+            pyth_release: release_policy,
             private_market,
         })?
     );
