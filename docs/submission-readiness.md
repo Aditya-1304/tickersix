@@ -21,7 +21,8 @@ The gate verifies:
 - exact local IDL hash against the recorded Devnet artifact;
 - deployed program ID, upgradeable-loader ownership, and metadata fields;
 - finalized public Devnet account state;
-- clean patch formatting.
+- clean patch formatting;
+- repository credential audit over source, app, scripts, docs, and fixtures.
 
 The gate is read-only. It does not sign, deploy, upgrade the program, create a
 wallet, or request Devnet funds.
@@ -59,3 +60,13 @@ The current verified deployment records are under
 
 The deployment authority is intentionally recorded as a public address only;
 the wallet file remains outside the repository.
+
+## Credential audit
+
+Run the standalone read-only audit with:
+
+```bash
+scripts/security-audit.sh
+```
+
+It rejects private-key PEM material and non-placeholder values assigned to API-key, private-key, secret-key, seed-phrase, or mnemonic fields in the release-relevant repository roots. Configuration names, environment lookups, typed fields, and documented `...` placeholders are allowed.

@@ -48,6 +48,7 @@ pub mod rating;
 pub mod recovery;
 pub mod release_evidence;
 pub mod replay;
+pub mod security_audit;
 pub mod settlement;
 pub mod standings;
 
@@ -211,6 +212,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Some("sponsor-readiness-gate") => run_sponsor_readiness_gate()?,
         Some("beta-evidence-gate") => run_beta_evidence_gate()?,
         Some("league-evidence-gate") => run_league_evidence_gate()?,
+        Some("security-audit") => run_security_audit()?,
         Some("release-freeze-gate") => run_release_freeze_gate()?,
         Some("jupiter-proof-gate") => run_jupiter_proof_gate()?,
         Some("jupiter-smoke") => run_jupiter_smoke().await?,
@@ -441,6 +443,23 @@ fn run_league_evidence_gate() -> Result<(), Box<dyn Error>> {
         })
     );
     Ok(())
+}
+
+/// Runs the repository credential audit without changing files or contacting
+/// Solana. A non-empty finding list is a release-blocking error.
+fn run_security_audit() -> Result<(), Box<dyn Error>> {
+    let root = env::args().nth(2).unwrap_or_else(|| ".".to_owned());
+    let findings = security_audit::audit_repository(&root)?;
+    println!("{}", serde_json::to_string_pretty(&findings)?);
+    if findings.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "security audit found {} potential credential leak(s)",
+            findings.len()
+        )
+        .into())
+    }
 }
 
 /// Runs the release freeze gate against a freeze record and
@@ -1013,6 +1032,7 @@ Market-data baseline gate: cargo run -p backend -- market-data-baseline-gate fix
 Sponsor readiness gate: cargo run -p backend -- sponsor-readiness-gate fixtures/market-data/sponsors
 Beta evidence gate: cargo run -p backend -- beta-evidence-gate [manifest.json]
 League evidence gate: cargo run -p backend -- league-evidence-gate <report.json>
+Security audit: cargo run -p backend -- security-audit [repository-root]
 Release freeze gate: cargo run -p backend -- release-freeze-gate [freeze.json] [beta.json]
 Jupiter proof gate: cargo run -p backend -- jupiter-proof-gate <bundle.json>
 Live Jupiter smoke: cargo run -p backend -- jupiter-smoke <mint[,mint...]>
