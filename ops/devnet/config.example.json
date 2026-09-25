@@ -1,0 +1,18 @@
+{
+  "roundId": 1,
+  "registryVersion": 1,
+  "attestors": [
+    "REPLACE_WITH_ATTESTOR_A_PUBLIC_KEY",
+    "REPLACE_WITH_ATTESTOR_B_PUBLIC_KEY",
+    "REPLACE_WITH_ATTESTOR_C_PUBLIC_KEY"
+  ],
+  "assets": [],
+  "timing": {
+    "queueCloseAfterSecs": 600,
+    "commitWindowSecs": 600,
+    "revealWindowSecs": 600,
+    "startDelaySecs": 60,
+    "sampleIntervalSecs": 5,
+    "observationWindowSecs": 120
+  }
+}
