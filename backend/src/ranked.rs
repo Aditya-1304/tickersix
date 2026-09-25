@@ -9,7 +9,8 @@ use std::fmt;
 
 use protocol::{pair_ranked, RankedPlayer};
 use relay::{
-    build_create_rated_battle_instruction, create_rated_battle_pdas, CreateRatedBattleAccounts,
+    build_create_rated_battle_instruction, create_rated_battle_pdas, market_round_pda,
+    CreateRatedBattleAccounts,
 };
 use serde::Serialize;
 use sqlx::{postgres::PgRow, PgPool, Postgres, Row, Transaction};
@@ -888,11 +889,33 @@ fn market_round_from_row(row: &PgRow) -> Result<NextMarketRound, RankedError> {
         start_target_at: row.try_get("start_target_at").map_err(storage_error)?,
         end_target_at: row.try_get("end_target_at").map_err(storage_error)?,
     };
+    if !round.is_replay {
+        validate_market_round_identity(round.round_sequence, round.chain_pubkey.as_deref())?;
+    }
     if round.queue_close_at >= round.start_target_at || round.start_target_at >= round.end_target_at
     {
         return Err(RankedError::InvalidRound);
     }
     Ok(round)
+}
+
+/// Ensures a live ranked round is represented by its canonical on-chain PDA.
+///
+/// The database is only a projection of the Solana program. A syntactically
+/// valid public key is therefore insufficient: the stored identity must equal
+/// the PDA derived from the persisted round sequence before the round can be
+/// exposed to queueing or matchmaking.
+fn validate_market_round_identity(
+    round_sequence: i64,
+    chain_pubkey: Option<&str>,
+) -> Result<(), RankedError> {
+    let round_sequence = u64::try_from(round_sequence).map_err(|_| RankedError::InvalidRound)?;
+    let chain_pubkey = chain_pubkey.ok_or(RankedError::InvalidRound)?;
+    let stored_pubkey = parse_wallet(chain_pubkey).map_err(|_| RankedError::InvalidRound)?;
+    if stored_pubkey != market_round_pda(round_sequence) {
+        return Err(RankedError::InvalidRound);
+    }
+    Ok(())
 }
 
 fn validate_matchmaker_window(round: &NextMarketRound, now: i64) -> Result<(), RankedError> {
@@ -1468,6 +1491,28 @@ mod tests {
 
         assert_eq!(
             validate_queue_round(&round, 50),
+            Err(RankedError::InvalidRound)
+        );
+    }
+
+    #[test]
+    fn live_rounds_require_the_canonical_market_round_pda() {
+        let expected = bs58::encode(market_round_pda(7)).into_string();
+
+        assert_eq!(
+            validate_market_round_identity(7, Some(&expected)),
+            Ok(())
+        );
+        assert_eq!(
+            validate_market_round_identity(7, Some("local-dev-round-7")),
+            Err(RankedError::InvalidRound)
+        );
+        assert_eq!(
+            validate_market_round_identity(7, None),
+            Err(RankedError::InvalidRound)
+        );
+        assert_eq!(
+            validate_market_round_identity(0, Some(&expected)),
             Err(RankedError::InvalidRound)
         );
     }
