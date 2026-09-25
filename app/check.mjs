@@ -1,6 +1,6 @@
 import { readFile } from "node:fs/promises";
 
-const requiredFiles = ["index.html", "styles.css", "app.js", "wallet-client.js", "wallet-client.test.mjs", "package.json"];
+const requiredFiles = ["index.html", "styles.css", "app.js", "wallet-client.js", "wallet-client.test.mjs", "lineup.mjs", "lineup.test.mjs", "package.json"];
 const requiredMarkers = [
   ["index.html", "TickerSix"],
   ["styles.css", "@media (max-width: 760px)"],
@@ -17,6 +17,8 @@ const requiredMarkers = [
   ["app.js", "/v1/ranked/status"],
   ["app.js", "/v1/market-rounds/"],
   ["app.js", "FROZEN PUBLIC UNIVERSE"],
+  ["app.js", "REVIEW LINEUP"],
+  ["app.js", "lineup-review"],
   ["wallet-client.js", "wallet-standard:register-wallet"],
 ];
 

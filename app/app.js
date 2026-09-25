@@ -7,6 +7,7 @@
  * This client never signs, sends, settles, rates, or mutates achievements.
  */
 
+import { validateLineup } from "./lineup.mjs";
 import { discoverWallet } from "./wallet-client.js";
 
 const API_BASE = window.TICKERSIX_API_BASE || "";
@@ -749,7 +750,34 @@ function renderRoster() {
         .map((asset) => `<option value="${asset.id}" ${asset.id === state.captain ? "selected" : ""}>${escapeHtml(asset.symbol)}</option>`)
         .join("")}</select></div>
       <div class="source-line"><span class="domain-pill">Reference identity: canonical</span><span class="domain-pill">Quality: ${selectedCount === 6 ? "ELIGIBLE" : "INCOMPLETE"}</span><span class="domain-pill">Lock: 11:55 UTC</span></div>
-      <div class="hero-actions"><button class="button" data-action="battle" ${selectedCount === 6 ? "" : "disabled"}>CONTINUE TO BATTLE</button><button class="button secondary" data-action="queue">BACK TO QUEUE</button></div>
+      <div class="hero-actions"><button class="button" data-action="review-lineup" ${selectedCount === 6 ? "" : "disabled"}>REVIEW LINEUP</button><button class="button secondary" data-action="queue">BACK TO QUEUE</button></div>
+    </article>`;
+}
+
+function renderLineupReview() {
+  const lineup = [...state.selectedAssets]
+    .map((assetId) => state.assets.find((asset) => asset.id === assetId))
+    .filter(Boolean);
+  const validation = validateLineup(state.selectedAssets, state.captain, state.assets);
+  const lockDeadline = state.round.commit_deadline || state.round.start_target_at;
+  const lockLabel = lockDeadline
+    ? new Date(lockDeadline * 1000).toISOString()
+    : "pending from the indexed Battle";
+
+  return `
+    <section class="hero">
+      <p class="eyebrow">Round ${escapeHtml(state.round.round_sequence)} · Lineup Review</p>
+      <h1>Review before locking.</h1>
+      <p class="lede">This is the exact lineup that will be committed for Battle ${escapeHtml(shortValue(state.battlePubkey))}. Once locked, it cannot be changed.</p>
+    </section>
+    <article class="card">
+      <div class="row"><div><h2>YOUR SIX</h2><span class="muted">${lineup.length} / 6 frozen assets selected</span></div><span class="status-pill">${validation.valid ? "READY TO LOCK" : "INCOMPLETE"}</span></div>
+      <section class="grid three">
+        ${lineup.map((asset) => `<article class="card stat-card"><span class="stat-label">${asset.id === state.captain ? "CAPTAIN · 2×" : "PICK"}</span><span class="stat-value">${escapeHtml(asset.symbol)}</span><span class="stat-subvalue">${escapeHtml(asset.name)}</span></article>`).join("")}
+      </section>
+      <div class="source-line"><span class="domain-pill">Round ${escapeHtml(String(state.round.round_sequence))}</span><span class="domain-pill">Lock deadline: ${escapeHtml(lockLabel)}</span><span class="domain-pill">${escapeHtml(state.round.settlement_source_kind)}</span></div>
+      ${validation.valid ? "" : `<div class="alert"><strong>LINEUP NOT READY:</strong> ${escapeHtml(validation.reason)}</div>`}
+      <div class="hero-actions"><button class="button" data-action="lock-lineup" disabled>LOCK LINEUP ON SOLANA</button><button class="button secondary" data-action="roster">EDIT LINEUP</button></div>
     </article>`;
 }
 
@@ -1000,6 +1028,8 @@ function renderView() {
       return renderLeague();
     case "roster":
       return renderRoster();
+    case "lineup-review":
+      return renderLineupReview();
     case "battle":
       return renderBattle();
     case "result":
@@ -1288,7 +1318,7 @@ document.addEventListener("click", async (event) => {
     setView("profile");
     return;
   }
-  if (action === "home" || action === "queue" || action === "battle" || action === "result" || action === "proof") {
+  if (action === "home" || action === "queue" || action === "roster" || action === "result" || action === "proof") {
     if (action === "proof") await loadProof();
     setView(action === "home" ? "home" : action);
     return;
@@ -1331,6 +1361,15 @@ document.addEventListener("click", async (event) => {
     await joinQueue();
     return;
   }
+  if (action === "review-lineup") {
+    const validation = validateLineup(state.selectedAssets, state.captain, state.assets);
+    if (!validation.valid) {
+      showToast(`Lineup review failed: ${validation.reason}`);
+      return;
+    }
+    setView("lineup-review");
+    return;
+  }
   if (action === "build-lineup") {
     if (!state.pairing?.battle_pubkey) {
       showToast("Wait for the coordinator to create the Battle.");
@@ -1368,6 +1407,7 @@ document.addEventListener("change", (event) => {
     if (event.target.checked && state.selectedAssets.size < 6) state.selectedAssets.add(id);
     if (!event.target.checked) state.selectedAssets.delete(id);
     if (state.selectedAssets.size === 6 && !state.selectedAssets.has(state.captain)) state.captain = [...state.selectedAssets][0];
+    if (!state.selectedAssets.has(state.captain)) state.captain = [...state.selectedAssets][0] ?? null;
     render();
     return;
   }
