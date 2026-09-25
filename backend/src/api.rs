@@ -6,11 +6,11 @@
 
 use std::{env, error::Error, fmt, path::PathBuf, sync::Arc, time::Duration};
 
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::CorsLayer;
 
 use axum::{
     extract::{Path, Query, State},
-    http::{header, HeaderMap, HeaderValue, StatusCode},
+    http::{header, HeaderMap, HeaderValue, Method, StatusCode},
     response::{
         sse::{KeepAlive, Sse},
         IntoResponse, Response,
@@ -81,42 +81,42 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/auth/challenge", post(create_challenge))
         .route("/v1/auth/verify", post(verify_challenge))
         .route("/v1/auth/logout", post(logout))
-        .route("/v1/profiles/:wallet", get(get_profile))
-        .route("/v1/profiles/:wallet/history", get(get_profile_history))
+        .route("/v1/profiles/{wallet}", get(get_profile))
+        .route("/v1/profiles/{wallet}/history", get(get_profile_history))
         .route(
-            "/v1/profiles/:wallet/achievements",
+            "/v1/profiles/{wallet}/achievements",
             get(get_profile_achievements),
         )
         .route("/v1/profile/me", get(get_my_profile).put(update_my_profile))
         .route("/v1/market-rounds/next", get(get_next_market_round))
         .route(
-            "/v1/market-rounds/:pubkey/proof",
+            "/v1/market-rounds/{pubkey}/proof",
             get(get_market_round_proof),
         )
-        .route("/v1/battles/:pubkey/proof", get(get_battle_proof))
-        .route("/v1/battles/:pubkey/replay", get(get_battle_replay))
+        .route("/v1/battles/{pubkey}/proof", get(get_battle_proof))
+        .route("/v1/battles/{pubkey}/replay", get(get_battle_replay))
         .route(
             "/v1/private-markets/assets",
             get(list_private_market_assets),
         )
         .route(
-            "/v1/private-markets/assets/:id",
+            "/v1/private-markets/assets/{id}",
             get(get_private_market_asset),
         )
         .route(
-            "/v1/private-markets/assets/:id/representations",
+            "/v1/private-markets/assets/{id}/representations",
             get(get_private_market_representations),
         )
         .route(
-            "/v1/private-markets/comparisons/:asset_id",
+            "/v1/private-markets/comparisons/{asset_id}",
             get(get_private_market_comparison),
         )
         .route("/v1/leagues", get(list_leagues))
-        .route("/v1/leagues/:id", get(get_league))
-        .route("/v1/leagues/:id/join", post(join_league))
-        .route("/v1/leagues/:id/leave", post(leave_league))
-        .route("/v1/leagues/:id/rounds", get(get_league_rounds))
-        .route("/v1/leagues/:id/standings", get(get_league_standings))
+        .route("/v1/leagues/{id}", get(get_league))
+        .route("/v1/leagues/{id}/join", post(join_league))
+        .route("/v1/leagues/{id}/leave", post(leave_league))
+        .route("/v1/leagues/{id}/rounds", get(get_league_rounds))
+        .route("/v1/leagues/{id}/standings", get(get_league_standings))
         .route(
             "/v1/ranked/queue",
             post(join_ranked_queue).delete(leave_ranked_queue),
@@ -124,7 +124,7 @@ pub fn router(state: ApiState) -> Router {
         .route("/v1/ranked/status", get(get_ranked_status))
         .route("/v1/leaderboards/global", get(get_global_leaderboard))
         .route("/v1/leaderboards/global/me", get(get_my_leaderboard))
-        .route("/v1/stream/battles/:pubkey", get(stream_battle))
+        .route("/v1/stream/battles/{pubkey}", get(stream_battle))
         .route("/metrics", get(get_metrics))
         .with_state(state);
 
@@ -137,8 +137,14 @@ pub fn router(state: ApiState) -> Router {
                         .expect("configured web origin is a valid header value"),
                 )
                 .allow_credentials(true)
-                .allow_methods(Any)
-                .allow_headers(Any),
+                .allow_methods([
+                    Method::GET,
+                    Method::POST,
+                    Method::PUT,
+                    Method::DELETE,
+                    Method::OPTIONS,
+                ])
+                .allow_headers([header::ACCEPT, header::AUTHORIZATION, header::CONTENT_TYPE]),
         ),
         None => router,
     }
@@ -877,6 +883,19 @@ mod tests {
     use axum::http::{header, HeaderMap};
 
     use super::*;
+
+    #[tokio::test]
+    async fn credentialed_web_origin_builds_without_a_wildcard_cors_header() {
+        let pool = PgPoolOptions::new()
+            .connect_lazy(
+                "postgresql://stocklana:stocklana_devnet_local@127.0.0.1:55432/stocklana_devnet",
+            )
+            .expect("lazy PostgreSQL pool should accept the local test URL");
+        let state =
+            ApiState::new(pool, "127.0.0.1", false).with_web_origin("http://127.0.0.1:4173");
+
+        let _router = router(state);
+    }
 
     #[test]
     fn session_cookie_parser_does_not_confuse_similar_cookie_names() {

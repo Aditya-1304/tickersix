@@ -6,7 +6,7 @@ node_modules
 test-ledger
 .yarn
 .surfpool
-# STOCK*
+STOCK*
 
 .attestor-*.secret
 attestor-*.json
