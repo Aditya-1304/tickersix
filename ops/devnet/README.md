@@ -55,6 +55,16 @@ skips already-created accounts only when they belong to the configured program
 and writes a public manifest under artifacts/devnet-round/. It does not
 silently overwrite an existing protocol configuration.
 
-After submission, the manifest supplies the chain identities and timing needed
-to ingest the round into the backend projection. The indexing step must still
-verify finalized account state before the API exposes the round.
+After submission, import the manifest into the local projection only after
+confirming the transaction output and finalized account state:
+
+```bash
+export TICKERSIX_DATABASE_URL="postgresql://stocklana:stocklana_devnet_local@127.0.0.1:55432/stocklana_devnet"
+export TICKERSIX_DEVNET_RPC_URL="https://api.devnet.solana.com"
+NO_DNA=1 cargo run -p backend -- index-round-manifest \
+  artifacts/devnet-round/round-1-manifest.json
+```
+
+The importer rechecks canonical identities and finalized program ownership
+before writing the MarketRound and RoundAsset projections. A successful import
+is the point at which the API can expose the round to the ranked queue.

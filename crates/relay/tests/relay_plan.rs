@@ -1,4 +1,4 @@
-use anchor_lang::InstructionData;
+use anchor_lang::{prelude::Pubkey, InstructionData};
 use market_data::{AttestorSigner, CanonicalPriceReport, PriceReportContext, SignedAttestorReport};
 use relay::{
     build_commit_lineup_instruction, build_create_league_rated_battle_instruction,
@@ -11,15 +11,49 @@ use relay::{
     build_settle_side_score_instruction, build_signed_legacy_relay_transaction,
     build_submit_price_attestation_plan, build_void_battle_price_unavailable_instruction,
     build_void_battle_system_incident_instruction, league_member_pda, league_pda, market_round_pda,
-    serialize_unsigned_legacy_transaction, CommitLineupAccounts, CreateOfficialLeagueAccounts,
-    CreateRatedBattleAccounts, FinalizeAccounts, LeagueMembershipAccounts,
-    LeagueRatedBattleAccounts, RelayAccounts, RelayError, RevealLineupAccounts,
+    registry_entry_pda, round_asset_pda, serialize_unsigned_legacy_transaction,
+    CommitLineupAccounts, CreateOfficialLeagueAccounts, CreateRatedBattleAccounts,
+    FinalizeAccounts, LeagueMembershipAccounts, LeagueRatedBattleAccounts, RelayAccounts,
+    RelayError, RevealLineupAccounts,
 };
 use solana_address::Address;
 use solana_hash::Hash;
 use solana_keypair::Keypair;
 use solana_sdk_ids::ed25519_program;
 use solana_signer::Signer;
+
+#[test]
+fn round_asset_pda_binds_the_round_and_asset_id() {
+    let market_round = market_round_pda(7);
+    let expected = Pubkey::find_program_address(
+        &[
+            tickersix::ROUND_ASSET_SEED,
+            &market_round,
+            &11u16.to_le_bytes(),
+        ],
+        &tickersix::ID,
+    )
+    .0
+    .to_bytes();
+
+    assert_eq!(round_asset_pda(market_round, 11), expected);
+    assert_ne!(
+        round_asset_pda(market_round, 11),
+        round_asset_pda(market_round, 12)
+    );
+
+    let registry_expected = Pubkey::find_program_address(
+        &[
+            tickersix::ASSET_SEED,
+            &1u32.to_le_bytes(),
+            &11u16.to_le_bytes(),
+        ],
+        &tickersix::ID,
+    )
+    .0
+    .to_bytes();
+    assert_eq!(registry_entry_pda(1, 11), registry_expected);
+}
 
 #[test]
 fn unsigned_wallet_transaction_contains_one_placeholder_signature_and_the_commit_instruction() {

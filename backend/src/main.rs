@@ -50,6 +50,7 @@ pub mod rating;
 pub mod recovery;
 pub mod release_evidence;
 pub mod replay;
+pub mod round_import;
 pub mod security_audit;
 pub mod settlement;
 pub mod standings;
@@ -222,6 +223,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         Some("private-market-smoke") => run_private_market_smoke().await?,
         Some("pyth-pro-smoke") => run_pyth_pro_smoke().await?,
         Some("attestor-run") => attestor::run().await?,
+        Some("index-round-manifest") => run_round_manifest_import().await?,
         Some("api-serve") => api::serve_from_env().await?,
         Some("ranked-match") => run_ranked_match().await?,
         Some("rating-apply") => run_rating_apply().await?,
@@ -719,6 +721,27 @@ async fn record_token_metadata() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+async fn run_round_manifest_import() -> Result<(), Box<dyn Error>> {
+    let manifest_path = env::args()
+        .nth(2)
+        .ok_or("usage: cargo run -p backend -- index-round-manifest <manifest.json>")?;
+    let database_url = env::var("TICKERSIX_DATABASE_URL")
+        .map_err(|_| "TICKERSIX_DATABASE_URL must point to PostgreSQL")?;
+    let rpc_url = env::var("TICKERSIX_DEVNET_RPC_URL")
+        .unwrap_or_else(|_| "https://api.devnet.solana.com".to_owned());
+    let pool = PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&database_url)
+        .await?;
+    db::run_migrations(&pool).await?;
+    let summary = round_import::import_manifest(&pool, manifest_path, &rpc_url).await?;
+    println!(
+        "indexed_market_round_id={} round_assets={}",
+        summary.market_round_id, summary.round_asset_count
+    );
+    Ok(())
+}
+
 async fn run_ranked_match() -> Result<(), Box<dyn Error>> {
     let market_round_id = env::args()
         .nth(2)
@@ -1054,6 +1077,7 @@ TICKERSIX_MARKET_DATA_ITERATIONS, TICKERSIX_MARKET_DATA_SAMPLE_INTERVAL_SECS
 
 Analysis: cargo run -p backend -- analyze-market-data market-data/attestor-0.ndjson
 Attestor worker: TICKERSIX_ATTESTOR_CONFIG=attestor.json cargo run -p backend -- attestor-run
+Devnet round projection: TICKERSIX_DATABASE_URL=postgres://... cargo run -p backend -- index-round-manifest artifacts/devnet-round/round-1-manifest.json
 HTTP API: TICKERSIX_DATABASE_URL=postgres://... cargo run -p backend -- api-serve
 Ranked matcher: TICKERSIX_DATABASE_URL=postgres://... cargo run -p backend -- ranked-match <market_round_id>
 Rating worker: TICKERSIX_DATABASE_URL=postgres://... cargo run -p backend -- rating-apply

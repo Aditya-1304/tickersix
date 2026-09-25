@@ -616,6 +616,34 @@ pub fn market_round_pda(round_id: u64) -> [u8; 32] {
     .to_bytes()
 }
 
+/// Derives the canonical RoundAsset PDA for one frozen MarketRound asset.
+pub fn round_asset_pda(market_round: [u8; 32], asset_id: u16) -> [u8; 32] {
+    AnchorPubkey::find_program_address(
+        &[
+            tickersix::ROUND_ASSET_SEED,
+            &market_round,
+            &asset_id.to_le_bytes(),
+        ],
+        &tickersix::ID,
+    )
+    .0
+    .to_bytes()
+}
+
+/// Derives the canonical registry entry PDA for one versioned asset identity.
+pub fn registry_entry_pda(registry_version: u32, asset_id: u16) -> [u8; 32] {
+    AnchorPubkey::find_program_address(
+        &[
+            tickersix::ASSET_SEED,
+            &registry_version.to_le_bytes(),
+            &asset_id.to_le_bytes(),
+        ],
+        &tickersix::ID,
+    )
+    .0
+    .to_bytes()
+}
+
 /// Derives the canonical Config PDA used by all player-facing League
 /// membership instructions.
 pub fn config_pda() -> [u8; 32] {
